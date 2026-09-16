@@ -64,6 +64,7 @@ export type ContractArtifact = {
 export type ReferenceProvenance = {
   referenceCommit: string;
   solcVersion: string;
+  solcTmpVersion: string;
   openZeppelinVersion: string;
   compilerSettings: {
     evmVersion: 'shanghai';
@@ -96,6 +97,20 @@ function assertPinnedInputs(entrySources: Record<string, string>): void {
   const solcVersion = solc.version();
   if (!solcVersion.startsWith('0.8.24+commit.e11b9ed9.')) {
     throw new Error(`expected solc 0.8.24, received ${solcVersion}`);
+  }
+
+  const solcTmpPackage = JSON.parse(
+    readFileSync(
+      require.resolve('tmp/package.json', {
+        paths: [join(repositoryRoot, 'node_modules', 'solc')],
+      }),
+      'utf8',
+    ),
+  ) as { version?: string };
+  if (solcTmpPackage.version !== '0.2.7') {
+    throw new Error(
+      `expected the solc-scoped tmp override at 0.2.7, received ${solcTmpPackage.version ?? 'unknown'}`,
+    );
   }
 
   for (const [sourceUnit, expectedHash] of Object.entries(expectedSourceHashes)) {
@@ -235,6 +250,7 @@ export function compileReferenceContracts(): ReferenceArtifacts {
     provenance: {
       referenceCommit: 'b9e466c250744a7e06b13dff9d3c2844ed64f825',
       solcVersion: solc.version(),
+      solcTmpVersion: '0.2.7',
       openZeppelinVersion: '5.4.0',
       compilerSettings: {
         evmVersion: 'shanghai',

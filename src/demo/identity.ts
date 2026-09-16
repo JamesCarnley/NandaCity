@@ -605,7 +605,7 @@ async function runScenario(
   verifyProfile(newOwnerProfile.candidate, snapshot);
 
   await testClient.mine({ blocks: 2 });
-  const observedHead = await publicClient.getBlockNumber();
+  const observedHead = await publicClient.getBlockNumber({ cacheTime: 0 });
   const confirmationCount = observedHead - BigInt(snapshot.blockNumber) + 1n;
   assert.ok(confirmationCount >= 1n, 'snapshot block must be observed in the local chain');
 

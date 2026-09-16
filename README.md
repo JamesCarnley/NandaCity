@@ -17,8 +17,9 @@ it does not fetch an AgentCard URL.
 - npm
 - Anvil 1.7.1 from Foundry, on `PATH`, for integration checks and the demo
 
-The local process workflow is tested on Linux in CI and is designed for macOS
-and Linux. Install the pinned Foundry release with:
+The local process workflow is verified on macOS and configured to run on Linux
+in CI; this branch does not claim an observed CI run. Install the pinned Foundry
+release with:
 
 ```sh
 foundryup --install v1.7.1
@@ -59,6 +60,12 @@ only the generated addresses through the local test RPC. It never reads a
 machine wallet or environment secret, never targets a non-loopback write RPC,
 and stops only the child process it created.
 
+Each launch supplies a randomized genesis block number and timestamp. Before the
+demo callback can fund an address or write a transaction, readiness checks the
+RPC chain ID and both marker fields and confirms the spawned child is still
+alive. If another process wins the brief port-allocation race, its RPC cannot be
+accepted as the owned chain and is not mutated or stopped.
+
 The deployment follows the upstream upgrade test rather than imitating the
 registry:
 
@@ -97,6 +104,14 @@ runs, and `viaIR: true`, matching the pinned reference settings. Run
 `npm run contracts:check` to inspect the source and compiled-artifact hashes.
 This narrow local bootstrap is test machinery, not a general installer or a
 recommended public deployment script.
+
+The pinned solc package declares legacy `tmp@0.0.33`. `package.json` narrowly
+overrides only solc's `tmp` dependency to patched `tmp@0.2.7` without changing
+the compiler. solc's actual `fileSync({ postfix: '.smt2' })` usage was checked
+against 0.2.7, including file creation, read/write, cleanup callback, and postfix
+behavior. Clean installation and `npm audit` report no vulnerabilities, while
+the enforced compiled-artifact hashes confirm that the override does not change
+compiler output.
 
 ## Identity boundary
 

@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import { promisify } from 'node:util';
 
@@ -14,6 +15,19 @@ export type OwnedAnvilResult<T> = {
   rpcUrl: string;
   processId: number;
 };
+
+export type AnvilGenesisMarker = {
+  blockNumber: bigint;
+  timestamp: bigint;
+};
+
+export type OwnedAnvilOptions = {
+  anvilBinary?: string;
+  genesisMarker?: AnvilGenesisMarker;
+  port?: number;
+};
+
+class OwnedAnvilMarkerMismatchError extends Error {}
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -36,6 +50,26 @@ async function availableLoopbackPort(): Promise<number> {
       });
     });
   });
+}
+
+function randomGenesisMarker(): AnvilGenesisMarker {
+  return {
+    blockNumber: 1_000_000n + BigInt(randomBytes(4).readUInt32BE()),
+    timestamp:
+      BigInt(Math.floor(Date.now() / 1_000)) + BigInt(randomBytes(3).readUIntBE(0, 3)),
+  };
+}
+
+function assertGenesisMarker(marker: AnvilGenesisMarker): void {
+  if (marker.blockNumber < 0n) {
+    throw new Error('owned Anvil genesis block number must be nonnegative');
+  }
+  if (
+    marker.timestamp < 0n ||
+    marker.timestamp > BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new Error('owned Anvil genesis timestamp must be a nonnegative safe integer');
+  }
 }
 
 export function assertLocalWriteRpcUrl(rpcUrl: string): void {
@@ -82,7 +116,12 @@ async function assertAnvilVersion(binary: string): Promise<void> {
   }
 }
 
-async function waitForReady(child: ChildProcess, rpcUrl: string): Promise<void> {
+async function waitForReady(
+  child: ChildProcess,
+  rpcUrl: string,
+  marker: AnvilGenesisMarker,
+  getSpawnError: () => Error | undefined,
+): Promise<void> {
   const client = createPublicClient({
     transport: http(rpcUrl, { retryCount: 0, timeout: 750 }),
   });
@@ -90,17 +129,45 @@ async function waitForReady(child: ChildProcess, rpcUrl: string): Promise<void> 
   let lastError: unknown;
 
   while (Date.now() < deadline) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error('owned Anvil process exited before its RPC became ready');
-    }
     try {
       const chainId = await client.getChainId();
       if (chainId !== 31_337) {
-        throw new Error(`owned Anvil returned unexpected chain ID ${chainId}`);
+        throw new OwnedAnvilMarkerMismatchError(
+          `owned Anvil genesis marker mismatch: expected chain ID 31337, received ${chainId}`,
+        );
+      }
+      const head = await client.getBlockNumber();
+      if (head !== marker.blockNumber) {
+        throw new OwnedAnvilMarkerMismatchError(
+          `owned Anvil genesis marker mismatch: expected block ${marker.blockNumber}, received ${head}`,
+        );
+      }
+      const genesis = await client.getBlock({ blockNumber: marker.blockNumber });
+      if (genesis.number !== marker.blockNumber || genesis.timestamp !== marker.timestamp) {
+        throw new OwnedAnvilMarkerMismatchError(
+          'owned Anvil genesis marker mismatch: timestamp or block number differs',
+        );
+      }
+      const spawnError = getSpawnError();
+      if (spawnError !== undefined) {
+        throw new Error('owned Anvil process failed during startup', { cause: spawnError });
+      }
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error('owned Anvil process exited before its RPC became ready');
       }
       return;
     } catch (error) {
+      if (error instanceof OwnedAnvilMarkerMismatchError) throw error;
       lastError = error;
+      const spawnError = getSpawnError();
+      if (spawnError !== undefined) {
+        throw new Error('owned Anvil process failed during startup', { cause: spawnError });
+      }
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error('owned Anvil process exited before its RPC became ready', {
+          cause: error,
+        });
+      }
       await delay(100);
     }
   }
@@ -128,12 +195,17 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<bool
 
 export async function withOwnedAnvil<T>(
   run: (rpcUrl: string) => Promise<T>,
-  options: { anvilBinary?: string } = {},
+  options: OwnedAnvilOptions = {},
 ): Promise<OwnedAnvilResult<T>> {
   const binary = options.anvilBinary ?? 'anvil';
   await assertAnvilVersion(binary);
 
-  const port = await availableLoopbackPort();
+  const marker = options.genesisMarker ?? randomGenesisMarker();
+  assertGenesisMarker(marker);
+  const port = options.port ?? (await availableLoopbackPort());
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error('owned Anvil port must be an integer from 1 through 65535');
+  }
   const rpcUrl = `http://127.0.0.1:${port}`;
   assertLocalWriteRpcUrl(rpcUrl);
 
@@ -146,6 +218,10 @@ export async function withOwnedAnvil<T>(
       String(port),
       '--chain-id',
       '31337',
+      '--number',
+      marker.blockNumber.toString(),
+      '--timestamp',
+      marker.timestamp.toString(),
       '--accounts',
       '0',
       '--hardfork',
@@ -154,6 +230,10 @@ export async function withOwnedAnvil<T>(
     ],
     { stdio: ['ignore', 'ignore', 'ignore'] },
   );
+  let spawnError: Error | undefined;
+  child.on('error', (error) => {
+    spawnError = error;
+  });
   const processId = child.pid;
   if (processId === undefined) {
     child.kill('SIGKILL');
@@ -187,7 +267,7 @@ export async function withOwnedAnvil<T>(
   }
 
   try {
-    await waitForReady(child, rpcUrl);
+    await waitForReady(child, rpcUrl, marker, () => spawnError);
     const value = await run(rpcUrl);
     return { value, rpcUrl, processId };
   } finally {

@@ -20,6 +20,11 @@ enabled at 200 runs, and `viaIR: true`. These sources and the proxy bootstrap ar
 local demonstration machinery. They are not a replacement registry and are not
 a deployment recommendation.
 
+The npm override for solc's legacy `tmp` dependency is deliberately limited to
+patched `tmp@0.2.7`. It preserves solc 0.8.24 and the `fileSync` API that solc's
+optional SMT-solver adapter uses. Clean-install audit and the artifact hashes
+below guard the dependency and compiler-output assumptions.
+
 The compiler also checks these SHA-256 hashes over each emitted ABI, creation
 bytecode, and deployed bytecode tuple:
 

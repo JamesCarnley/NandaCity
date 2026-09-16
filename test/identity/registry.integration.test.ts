@@ -1,12 +1,45 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { createPublicClient, http } from 'viem';
+
+import { withOwnedAnvil } from '../../src/demo/anvil.js';
+
 test('fails helpfully instead of skipping when Anvil is unavailable', async () => {
   const { runIdentityDemo } = await import('../../src/demo/identity.js');
 
   await assert.rejects(
     runIdentityDemo({ anvilBinary: 'nandacity-intentionally-missing-anvil' }),
     /Anvil 1\.7\.1.*foundryup/i,
+  );
+});
+
+test('does not enter the write callback when another chain occupies the selected port', async () => {
+  const foreignMarker = { blockNumber: 71_001n, timestamp: 1_710_000_001n };
+  const expectedMarker = { blockNumber: 82_002n, timestamp: 1_720_000_002n };
+
+  await withOwnedAnvil(
+    async (foreignRpcUrl) => {
+      let callbackEntered = false;
+      const port = Number(new URL(foreignRpcUrl).port);
+
+      await assert.rejects(
+        withOwnedAnvil(
+          async () => {
+            callbackEntered = true;
+          },
+          { port, genesisMarker: expectedMarker },
+        ),
+        /owned Anvil genesis marker mismatch/i,
+      );
+      assert.equal(callbackEntered, false);
+
+      const foreignClient = createPublicClient({
+        transport: http(foreignRpcUrl, { retryCount: 0, timeout: 1_000 }),
+      });
+      assert.equal(await foreignClient.getBlockNumber(), foreignMarker.blockNumber);
+    },
+    { genesisMarker: foreignMarker },
   );
 });
 
@@ -41,6 +74,7 @@ test('runs the identity acceptance story against an owned local Anvil process', 
     'b9e466c250744a7e06b13dff9d3c2844ed64f825',
   );
   assert.match(result.provenance.solcVersion, /^0\.8\.24\+commit\.e11b9ed9\./);
+  assert.equal(result.provenance.solcTmpVersion, '0.2.7');
   assert.equal(result.provenance.openZeppelinVersion, '5.4.0');
   assert.ok(BigInt(result.observedHead) >= BigInt(result.snapshot.blockNumber));
   assert.ok(BigInt(result.confirmationCount) >= 1n);
