@@ -13,7 +13,14 @@ const MAX_SAFE_REGISTRATION_ID = BigInt(Number.MAX_SAFE_INTEGER);
 const textEncoder = new TextEncoder();
 const fatalTextDecoder = new TextDecoder('utf-8', { fatal: true });
 
-const canonicalUintSchema = z.string().superRefine((value, context) => {
+const canonicalRegistrationIdSchema = z.string().superRefine((value, context) => {
+  if (value.length > 16) {
+    context.addIssue({
+      code: 'custom',
+      message: 'agentId must contain at most 16 digits',
+    });
+    return;
+  }
   if (!/^(0|[1-9][0-9]*)$/.test(value)) {
     context.addIssue({
       code: 'custom',
@@ -27,12 +34,20 @@ const canonicalUintSchema = z.string().superRefine((value, context) => {
   }
 });
 
-const registrationIdSchema = z
+const numericWireRegistrationIdSchema = z
+  .number()
+  .safe()
+  .int()
+  .nonnegative()
+  .transform((value) => String(value))
+  .pipe(canonicalRegistrationIdSchema);
+
+const normalizedRegistrationIdSchema = z
   .union([
-    z.number().safe().int().nonnegative().transform((value) => String(value)),
-    canonicalUintSchema,
+    numericWireRegistrationIdSchema,
+    canonicalRegistrationIdSchema,
   ])
-  .pipe(canonicalUintSchema);
+  .pipe(canonicalRegistrationIdSchema);
 
 const nonZeroAddressSchema = z.string().superRefine((value, context) => {
   if (!isAddress(value, { strict: true }) || value.toLowerCase() === ZERO_ADDRESS) {
@@ -86,42 +101,47 @@ const boundUrlSchema = z.string().superRefine((value, context) => {
   }
 });
 
-const registrationLocatorSchema = z
-  .object({
-    agentId: registrationIdSchema,
-    agentRegistry: z.string(),
-  })
-  .passthrough()
-  .superRefine((value, context) => {
-    const match = /^eip155:(0|[1-9][0-9]*):(0x[0-9a-fA-F]{40})$/.exec(
-      value.agentRegistry,
-    );
-    if (!match) {
-      context.addIssue({
-        code: 'custom',
-        path: ['agentRegistry'],
-        message: 'must be eip155:<canonical-chain-id>:<registry-address>',
-      });
-      return;
-    }
+function makeRegistrationLocatorSchema(agentIdSchema: z.ZodType<string>) {
+  return z
+    .object({
+      agentId: agentIdSchema,
+      agentRegistry: z.string(),
+    })
+    .passthrough()
+    .superRefine((value, context) => {
+      const match = /^eip155:(0|[1-9][0-9]*):(0x[0-9a-fA-F]{40})$/.exec(
+        value.agentRegistry,
+      );
+      if (!match) {
+        context.addIssue({
+          code: 'custom',
+          path: ['agentRegistry'],
+          message: 'must be eip155:<canonical-chain-id>:<registry-address>',
+        });
+        return;
+      }
 
-    const chainId = Number(match[1]);
-    if (!Number.isSafeInteger(chainId) || chainId <= 0) {
-      context.addIssue({
-        code: 'custom',
-        path: ['agentRegistry'],
-        message: 'chain ID must be a positive safe integer',
-      });
-    }
+      const chainId = Number(match[1]);
+      if (!Number.isSafeInteger(chainId) || chainId <= 0) {
+        context.addIssue({
+          code: 'custom',
+          path: ['agentRegistry'],
+          message: 'chain ID must be a positive safe integer',
+        });
+      }
 
-    if (!isAddress(match[2]!, { strict: true }) || match[2]!.toLowerCase() === ZERO_ADDRESS) {
-      context.addIssue({
-        code: 'custom',
-        path: ['agentRegistry'],
-        message: 'registry must be a non-zero Ethereum address',
-      });
-    }
-  });
+      if (
+        !isAddress(match[2]!, { strict: true }) ||
+        match[2]!.toLowerCase() === ZERO_ADDRESS
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['agentRegistry'],
+          message: 'registry must be a non-zero Ethereum address',
+        });
+      }
+    });
+}
 
 const serviceSchema = z
   .object({
@@ -155,39 +175,46 @@ const cityExtensionSchema = z.strictObject({
   areaServed: z.array(cityAreaSchema).min(1),
 });
 
-const registrationSchema = z
-  .object({
-    type: z.literal(REGISTRATION_TYPE),
-    name: z.string().min(1),
-    description: z.string().min(1),
-    image: boundUrlSchema,
-    active: z.boolean(),
-    x402Support: z.boolean(),
-    supportedTrust: z.array(z.never()).max(0).optional(),
-    registrations: z.array(registrationLocatorSchema).min(1),
-    services: z.array(serviceSchema).min(1),
-    'x-nandacity': cityExtensionSchema,
-  })
-  .passthrough()
-  .superRefine((value, context) => {
-    const a2aServices = value.services.filter((service) => service.name === 'A2A');
-    if (a2aServices.length !== 1) {
-      context.addIssue({
-        code: 'custom',
-        path: ['services'],
-        message: 'registration must contain exactly one A2A service',
-      });
-      return;
-    }
+function makeRegistrationSchema(agentIdSchema: z.ZodType<string>) {
+  return z
+    .object({
+      type: z.literal(REGISTRATION_TYPE),
+      name: z.string().min(1),
+      description: z.string().min(1),
+      image: boundUrlSchema,
+      active: z.boolean(),
+      x402Support: z.boolean(),
+      supportedTrust: z.array(z.never()).max(0).optional(),
+      registrations: z.array(makeRegistrationLocatorSchema(agentIdSchema)).min(1),
+      services: z.array(serviceSchema).min(1),
+      'x-nandacity': cityExtensionSchema,
+    })
+    .passthrough()
+    .superRefine((value, context) => {
+      const a2aServices = value.services.filter((service) => service.name === 'A2A');
+      if (a2aServices.length !== 1) {
+        context.addIssue({
+          code: 'custom',
+          path: ['services'],
+          message: 'registration must contain exactly one A2A service',
+        });
+        return;
+      }
 
-    if (a2aServices[0]!.version !== '0.3.0') {
-      context.addIssue({
-        code: 'custom',
-        path: ['services'],
-        message: 'A2A service version must be 0.3.0',
-      });
-    }
-  });
+      if (a2aServices[0]!.version !== '0.3.0') {
+        context.addIssue({
+          code: 'custom',
+          path: ['services'],
+          message: 'A2A service version must be 0.3.0',
+        });
+      }
+    });
+}
+
+const normalizedRegistrationSchema = makeRegistrationSchema(
+  normalizedRegistrationIdSchema,
+);
+const wireRegistrationSchema = makeRegistrationSchema(numericWireRegistrationIdSchema);
 
 const cardSkillSchema = z
   .object({
@@ -213,7 +240,7 @@ const agentCardSchema = z
   })
   .passthrough();
 
-export type Registration = z.infer<typeof registrationSchema>;
+export type Registration = z.infer<typeof normalizedRegistrationSchema>;
 export type AgentCard = z.infer<typeof agentCardSchema>;
 
 function decodeJson(bytes: Uint8Array, label: string): unknown {
@@ -231,8 +258,12 @@ function decodeJson(bytes: Uint8Array, label: string): unknown {
   }
 }
 
-function parseRegistration(input: unknown): Registration {
-  return registrationSchema.parse(input);
+function parseRegistrationInput(input: unknown): Registration {
+  return normalizedRegistrationSchema.parse(input);
+}
+
+function parseWireRegistration(input: unknown): Registration {
+  return wireRegistrationSchema.parse(input);
 }
 
 function decodeRegistrationBytes(uri: string): Uint8Array {
@@ -263,7 +294,7 @@ function decodeRegistrationBytes(uri: string): Uint8Array {
 }
 
 export function encodeRegistration(input: unknown): string {
-  const registration = parseRegistration(input);
+  const registration = parseRegistrationInput(input);
   const serializable = {
     ...registration,
     registrations: registration.registrations.map((entry) => ({
@@ -281,7 +312,7 @@ export function encodeRegistration(input: unknown): string {
 
 export function decodeRegistration(uri: string): Registration {
   const bytes = decodeRegistrationBytes(uri);
-  return parseRegistration(decodeJson(bytes, 'registration'));
+  return parseWireRegistration(decodeJson(bytes, 'registration'));
 }
 
 export function decodeCard(bytes: Uint8Array): AgentCard {

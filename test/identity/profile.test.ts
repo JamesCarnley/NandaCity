@@ -65,6 +65,24 @@ test('rejects unsafe and noncanonical registration IDs', () => {
   };
   unsafeString.registrations[0]!.agentId = '9007199254740992';
   assert.throws(() => encodeRegistration(unsafeString), /agentId/i);
+
+  const oversizedString = cloneOriginalRegistration() as unknown as {
+    registrations: Array<{ agentId: string }>;
+  };
+  oversizedString.registrations[0]!.agentId = '1'.repeat(17);
+  assert.throws(
+    () => encodeRegistration(oversizedString),
+    /agentId.*at most 16 digits/i,
+  );
+});
+
+test('rejects string registration IDs on the wire', () => {
+  const stringId = cloneOriginalRegistration() as unknown as {
+    registrations: Array<{ agentId: string }>;
+  };
+  stringId.registrations[0]!.agentId = '7';
+
+  assert.throws(() => decodeRegistration(dataUriFor(stringId)), /agentId/i);
 });
 
 test('rejects malformed registration payloads and fatal UTF-8 failures', () => {

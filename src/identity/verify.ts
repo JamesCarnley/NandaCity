@@ -50,7 +50,13 @@ export type VerifiedProfile = {
 };
 
 function assertCanonicalUint(value: unknown, label: string): asserts value is string {
-  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) {
+  if (typeof value !== 'string') {
+    throw new Error(`${label} must be a canonical unsigned decimal string`);
+  }
+  if (value.length > 78) {
+    throw new Error(`${label} must contain at most 78 digits`);
+  }
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) {
     throw new Error(`${label} must be a canonical unsigned decimal string`);
   }
   if (BigInt(value) > MAX_UINT256) {

@@ -168,3 +168,31 @@ test('rejects malformed snapshot and candidate identifiers', () => {
     /registry|snapshot agent/i,
   );
 });
+
+test('rejects oversized decimal identifiers before uint256 parsing', () => {
+  const oversized = '1'.repeat(79);
+
+  assert.throws(
+    () =>
+      verifyProfile(
+        {
+          ...originalCandidate,
+          agent: { ...originalCandidate.agent, agentId: oversized },
+        },
+        originalBasis,
+      ),
+    /candidate\.agent\.agentId.*at most 78 digits/i,
+  );
+  assert.throws(
+    () =>
+      verifyProfile(originalCandidate, {
+        ...originalBasis,
+        agent: { ...originalBasis.agent, agentId: oversized },
+      }),
+    /basis\.agent\.agentId.*at most 78 digits/i,
+  );
+  assert.throws(
+    () => verifyProfile(originalCandidate, { ...originalBasis, blockNumber: oversized }),
+    /blockNumber.*at most 78 digits/i,
+  );
+});
