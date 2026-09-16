@@ -8,17 +8,23 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --import tsx --test test/**/*.test.ts",
+    "test": "node --import tsx --test test/identity/profile.test.ts test/identity/registry.test.ts test/identity/verify.test.ts",
+    "test:integration": "node --import tsx --test test/identity/registry.integration.test.ts",
+    "contracts:check": "node --import tsx scripts/check-reference-contracts.ts",
+    "demo:identity": "node --import tsx src/cli.ts identity demo",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build && npm run test:integration"
   },
   "dependencies": {
     "viem": "2.56.6",
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@openzeppelin/contracts": "5.4.0",
+    "@openzeppelin/contracts-upgradeable": "5.4.0",
     "@types/node": "24.13.5",
+    "solc": "0.8.24",
     "tsx": "4.23.13",
     "typescript": "7.0.2"
   }
