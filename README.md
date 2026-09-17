@@ -5,6 +5,13 @@ ERC-8004 Identity Registry demonstration for a future city-specialist agent
 experience. It does **not** provide discovery, public-chain deployment, service
 invocation, receipts, reputation, a user interface, or a deployed service.
 
+The companion [NANDA Index fork](https://github.com/JamesCarnley/nanda-index-v2#structured-service-discovery)
+provides exact per-service capability, service-area and interface filtering,
+organization-admin publishing, and source-qualified results. It is useful without
+Ethereum or reputation. Connecting these Index projections to City's ERC-8004
+profiles across two independently persisted Index instances is the next
+integration step; that connection is not implemented yet.
+
 The codec validates an embedded ERC-8004 registration-v1 document, City's
 namespaced profile fields, and the selected minimal A2A 0.3 AgentCard shape. The
 pure verifier binds those exact bytes to a caller-supplied authority snapshot.
