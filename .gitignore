@@ -4,4 +4,4 @@ coverage/
 *.tsbuildinfo
 .env*
 !.env.example
-.superpowers/sdd/**/task-*-report.md
+.superpowers/
