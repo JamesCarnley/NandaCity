@@ -17,9 +17,10 @@ it does not fetch an AgentCard URL.
 - npm
 - Anvil 1.7.1 from Foundry, on `PATH`, for integration checks and the demo
 
-The local process workflow is verified on macOS and configured to run on Linux
-in CI; this branch does not claim an observed CI run. Install the pinned Foundry
-release with:
+The local process workflow is verified on macOS and in
+[Linux CI](https://github.com/JamesCarnley/NandaCity/actions/runs/35251688937),
+including the actual-Anvil integration tests. Install the pinned Foundry release
+with:
 
 ```sh
 foundryup --install v1.7.1
