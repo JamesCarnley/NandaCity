@@ -193,6 +193,32 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<bool
   });
 }
 
+async function stopOwnedProcess(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+
+  child.kill('SIGTERM');
+  if (await waitForExit(child, timeoutMs)) return;
+
+  child.kill('SIGKILL');
+  if (await waitForExit(child, timeoutMs)) return;
+
+  throw new Error('owned Anvil process did not confirm exit after SIGKILL');
+}
+
+export function createOwnedProcessStopper(
+  child: ChildProcess,
+  timeoutMs = STOP_TIMEOUT_MS,
+): () => Promise<void> {
+  let stopPromise: Promise<void> | undefined;
+  return () => {
+    stopPromise ??= stopOwnedProcess(child, timeoutMs);
+    return stopPromise;
+  };
+}
+
 export async function withOwnedAnvil<T>(
   run: (rpcUrl: string) => Promise<T>,
   options: OwnedAnvilOptions = {},
@@ -240,16 +266,7 @@ export async function withOwnedAnvil<T>(
     throw new Error('could not start the owned Anvil process');
   }
 
-  let stopped = false;
-  const stop = async () => {
-    if (stopped) return;
-    stopped = true;
-    child.kill('SIGTERM');
-    if (!(await waitForExit(child, STOP_TIMEOUT_MS))) {
-      child.kill('SIGKILL');
-      await waitForExit(child, STOP_TIMEOUT_MS);
-    }
-  };
+  const stop = createOwnedProcessStopper(child);
 
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
   const removeSignalHandlers = () => {
