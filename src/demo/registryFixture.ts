@@ -19,7 +19,7 @@ const minimalAbi = parseAbi(['function upgradeToAndCall(address newImplementatio
 
 export type CardRecord = { agentId: string; owner: Account; city: 'Chicago' | 'Boston';
   cardUrl: string; invocationUrl: string; revision: number; cardBytes: Uint8Array;
-  agentURI: string };
+  agentURI: string; operatorLabel?: string };
 
 export async function receipt(client: PublicClient, hash: Hash): Promise<import('viem').TransactionReceipt> {
   const result = await client.waitForTransactionReceipt({ hash, timeout: 10_000 });
@@ -48,8 +48,9 @@ export async function deployRegistry(client: PublicClient,
   return proxy;
 }
 
-function makeCard(record: Pick<CardRecord, 'city' | 'invocationUrl' | 'revision'>) {
-  return { protocolVersion: '0.3.0', name: `Operator ${record.city} Planner`,
+function makeCard(record: Pick<CardRecord, 'city' | 'invocationUrl' | 'revision' | 'operatorLabel'>) {
+  return { protocolVersion: '0.3.0',
+    name: record.operatorLabel ? `${record.operatorLabel} ${record.city} Planner` : `Operator ${record.city} Planner`,
     description: `Synthetic ${record.city} evening plan.`, url: record.invocationUrl,
     preferredTransport: 'JSONRPC', version: `0.${record.revision}.0`,
     capabilities: { streaming: false, pushNotifications: false, stateTransitionHistory: false },
@@ -62,7 +63,8 @@ export function published(record: CardRecord, chainId: number, registry: Address
   const cardBytes = new TextEncoder().encode(JSON.stringify(makeCard(record)));
   const agentURI = encodeRegistration({
     type: 'https://eips.ethereum.org/EIPS/eip-8004#registration-v1',
-    name: `Operator ${record.agentId} ${record.city} Planner`,
+    name: record.operatorLabel ? `${record.operatorLabel} ${record.city} Planner` :
+      `Operator ${record.agentId} ${record.city} Planner`,
     description: `Synthetic ${record.city} service from a simulated operator.`,
     image: `https://city.example/${record.city.toLowerCase()}.png`, active,
     x402Support: false, supportedTrust: [],
