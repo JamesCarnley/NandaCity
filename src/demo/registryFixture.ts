@@ -57,7 +57,8 @@ function makeCard(record: Pick<CardRecord, 'city' | 'invocationUrl' | 'revision'
     skills: [{ id: 'evening-plan', name: 'Evening Plan',
       description: 'Synthetic city evening plan.', tags: ['city'] }] };
 }
-export function published(record: CardRecord, chainId: number, registry: Address, active = true): CardRecord {
+export function published(record: CardRecord, chainId: number, registry: Address,
+  active = true, runtimeSigner?: Address): CardRecord {
   const cardBytes = new TextEncoder().encode(JSON.stringify(makeCard(record)));
   const agentURI = encodeRegistration({
     type: 'https://eips.ethereum.org/EIPS/eip-8004#registration-v1',
@@ -70,7 +71,7 @@ export function published(record: CardRecord, chainId: number, registry: Address
     services: [{ name: 'A2A', endpoint: record.cardUrl, version: '0.3.0' }],
     'x-nandacity': { version: '0.1', ownerAtPublication: record.owner.address,
       revision: record.revision, cardDigest: digestBytes(cardBytes),
-      endpoint: record.invocationUrl, receiptSigner: record.owner.address,
+      endpoint: record.invocationUrl, receiptSigner: runtimeSigner ?? record.owner.address,
       capability: 'evening-plan', areaServed: [{ '@type': 'City',
         '@id': record.city === 'Chicago' ? chicago : boston, name: record.city }] },
   });

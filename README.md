@@ -3,6 +3,9 @@
 NANDA City provides an identity/profile foundation, a real local ERC-8004
 registry demonstration, a two-Index local discovery fixture, a signed
 request/acceptance/completion format, and an owned loopback A2A task service.
+It now includes one fixture-labeled Chicago journey through an actual pinned
+NANDA Index and exact AgentCard to an A2A Task carrying signed City evidence,
+followed by an independent report.
 It does **not** provide public-chain deployment, real operator onboarding,
 reputation, a user interface, or a deployed service.
 
@@ -57,6 +60,7 @@ npm run typecheck
 npm run build
 npm run check
 npm run demo:discovery -- --index-checkout "$NANDA_INDEX_CHECKOUT"
+npm run demo:journey -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 ```
 
 `NANDA_INDEX_CHECKOUT` is required for `npm run test:integration` and
@@ -185,12 +189,13 @@ compiler output.
 - `receiptSigner` is a separate runtime key authorized only for City's signed
   acceptance and completion statements. It is not an owner or payment key.
 
-The broader City vision—finding a specialist, invoking it, inspecting provenance,
-and leaving portable feedback—remains future work. Public-chain writes, Index
-deployment, real service adapters, additional signing schemes, transport
-authentication, and reputation remain outside this slice. The local Index
-connector and independent City verification are demonstrated; they are not a
-production metadata fetcher or a trust verdict. See the
+The first owned Chicago journey now finds and invokes a fixture specialist and
+exports evidence plus an independent, stage-by-stage report. Portable feedback,
+real providers and live city data remain future work. Public-chain writes,
+Index deployment, additional signing schemes, transport authentication, and
+reputation remain outside this slice. The local Index connector and independent
+City verification are demonstrated; they are not a production metadata fetcher
+or a trust verdict. See the [journey](docs/chicago-journey.md) and
 [loopback A2A boundary](docs/a2a-loopback.md).
 
 ## Source layout
@@ -210,6 +215,8 @@ production metadata fetcher or a trust verdict. See the
 - `docs/interaction-format.md`: signed City interaction contract and limits.
 - `docs/a2a-loopback.md`: implemented task-service wire, durability, and auth
   boundary.
+- `docs/chicago-journey.md`: owned Index-to-A2A execution, independent evidence
+  check, and limits.
 - `src/cli.ts`: plain and JSON command output with nonzero failure status.
 - `test/identity/`: public fixtures, unit tests, and the actual Anvil integration
   suite.
