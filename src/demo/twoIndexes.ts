@@ -15,6 +15,7 @@ import { searchIndexes, type IndexSearchResult } from '../discovery/indexClient.
 import { verifyDiscoveryAtCurrentChain, verifyDiscoveryWithCard, type BlockRef,
   type IdentityDomain, type ServiceFilter } from '../discovery/verifyDiscovery.js';
 import { withOwnedAnvil } from './anvil.js';
+import { checkOwnedCancellation, ownedFetch } from './ownedLifecycle.js';
 import { INDEX_SOURCE_COMMIT, withOwnedIndexes, type OwnedIndex } from './indexProcesses.js';
 import { boston, chicago, deployRegistry, published, receipt, registryAbi,
   type CardRecord } from './registryFixture.js';
@@ -32,6 +33,7 @@ export type TwoIndexDemoResult = {
 };
 
 export async function listenOwnedServer(server: Server): Promise<string> {
+  checkOwnedCancellation();
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error): void => { server.off('listening', onListening); reject(error); };
     const onListening = (): void => { server.off('error', onError); resolve(); };
@@ -44,7 +46,10 @@ export async function listenOwnedServer(server: Server): Promise<string> {
   return `http://127.0.0.1:${address.port}`;
 }
 async function close(server: Server): Promise<void> {
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+    server.closeAllConnections();
+  });
 }
 const PROXY_MAX_BYTES = 2 * 1024 * 1024;
 const PROXY_DEADLINE_MS = 5_000;
@@ -130,6 +135,7 @@ async function waitFor<T>(read: () => Promise<T>, condition: (value: T) => boole
   const deadline = Date.now() + timeout;
   let last: T | undefined;
   while (Date.now() < deadline) {
+    checkOwnedCancellation();
     last = await read();
     if (condition(last)) return last;
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -183,7 +189,7 @@ function checkpoint(result: IndexSearchResult): BlockRef | null {
 
 async function scenario(rpcUrl: string, indexCheckout: string): Promise<Omit<TwoIndexDemoResult,
   'cleanup' | 'cityCommit' | 'cityWorkingTreeDirty'>> {
-  const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000 });
+  const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000, fetchFn: ownedFetch });
   const chain = createPublicClient({ transport, pollingInterval: 50 });
   const test = createTestClient({ mode: 'anvil', transport });
   const adminAccount = privateKeyToAccount(generatePrivateKey());

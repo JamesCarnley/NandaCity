@@ -30,6 +30,7 @@ import {
   type ProfileCandidate,
 } from '../identity/verify.js';
 import { assertLocalWriteRpcUrl, withOwnedAnvil } from './anvil.js';
+import { ownedFetch } from './ownedLifecycle.js';
 import {
   compileReferenceContracts,
   type ContractArtifact,
@@ -256,7 +257,7 @@ async function runScenario(
   artifacts: ReferenceArtifacts,
 ): Promise<ScenarioResult> {
   assertLocalWriteRpcUrl(rpcUrl);
-  const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000 });
+  const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000, fetchFn: ownedFetch });
   const publicClient = createPublicClient({ pollingInterval: 50, transport });
   const testClient = createTestClient({ mode: 'anvil', transport });
   const registryAdminAccount = privateKeyToAccount(generatePrivateKey());

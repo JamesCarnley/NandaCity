@@ -22,8 +22,8 @@ it does not fetch an AgentCard URL.
 - Node.js 24 or newer
 - npm
 - Anvil 1.7.1 from Foundry, on `PATH`, for integration checks and the demo
-- Docker with the `postgres:16` image available (or permission to pull it) for
-  the two-Index integration check and demo
+- Docker on a local Unix socket, with the `postgres:16` image available (or
+  permission to pull it), for the two-Index integration check and demo
 - A clean checkout of public `JamesCarnley/nanda-index-v2` at pinned commit
   `94dca70d86fcd915d8f6e46442e1e3a71ebb9ce7`, with `npm ci` run in its
   `server/` directory
@@ -67,6 +67,31 @@ server from source before launch. The tests do not silently skip Anvil, Docker,
 or the Index checkout. `npm run check` runs typechecking, all unit tests, the
 production build, and both real-chain integration suites. Generated TypeScript
 files are written to `dist/` and are not committed.
+
+Before any Docker mutation, the demo resolves the selected Docker endpoint
+(`DOCKER_CONTEXT` takes precedence over `DOCKER_HOST`, otherwise the saved
+context is inspected). Only an absolute `unix:///...` socket endpoint is
+supported; SSH, TCP (including loopback TCP), and other endpoint schemes are
+refused. The resolved endpoint is pinned with `--host` for creation, inspection,
+execution, and cleanup; the user's global context is never changed. A local
+Unix socket cannot prove there is no user-arranged forwarding behind it: this
+is an endpoint restriction, **not physical-host attestation**.
+
+Anvil and nested Index resources share one SIGINT/SIGTERM cancellation scope,
+installed before startup. Cancellation prevents new acquisitions; an acquisition
+already in flight is awaited and recorded before teardown. All recorded children
+and the ownership-labeled, uniquely named container are attempted before the
+original signal is re-raised. The name also permits ownership-checked recovery
+when Docker creates the container but fails to return its ID. Cleanup failures
+are reported, never treated as successful cleanup. Repeated signals do not skip
+cleanup or extend its 180-second hard shutdown deadline; expiry reports that
+resources may remain. SIGKILL or an OS crash cannot run this cleanup.
+
+Embedded `withOwnedAnvil` callbacks receive the shared lifecycle as their second
+argument; `withOwnedIndexes` exposes it as `owned.lifecycle`. Callbacks must await
+their work and cooperate with `lifecycle.signal` or `lifecycle.check()`. Nested
+scopes share the same owner; HTTP requests and convergence loops in the supplied
+demos observe cancellation. Teardown does not race an unawaited setup callback.
 
 `npm run demo:identity` prints a plain summary. Add `--json` as shown above for
 machine-readable output; `--silent` suppresses npm's lifecycle banner so stdout

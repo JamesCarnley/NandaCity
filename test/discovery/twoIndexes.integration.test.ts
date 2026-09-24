@@ -8,8 +8,42 @@ import { createPublicClient, http } from 'viem';
 import { withOwnedAnvil } from '../../src/demo/anvil.js';
 import { withOwnedIndexes } from '../../src/demo/indexProcesses.js';
 import { runTwoIndexDemo, waitForBothWithdrawals } from '../../src/demo/twoIndexes.js';
+import { signalProbe } from './signalHarness.js';
 
 const checkout = process.env['NANDA_INDEX_CHECKOUT'];
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  for (const stage of ['anvil-preflight', 'container-acquiring', 'index', 'ready'] as const) {
+    test(`${signal} during ${stage} cleans the complete owned tree before exit`, { timeout: 90_000 }, async () => {
+      assert.ok(checkout);
+      await signalProbe(checkout, signal, stage);
+    });
+  }
+}
+
+test('repeated SIGINT does not bypass in-flight acquisition cleanup', { timeout: 90_000 }, async () => {
+  assert.ok(checkout);
+  await signalProbe(checkout, 'SIGINT', 'container-acquiring', true);
+});
+
+test('failed Docker acquisition receipt still removes the verified owned container', { timeout: 90_000 }, async () => {
+  assert.ok(checkout);
+  await signalProbe(checkout, 'SIGTERM', 'lost-receipt');
+});
+
+for (const stage of ['container-acquiring', 'ready'] as const) {
+  test(`Ctrl-C style owned process-group SIGINT during ${stage} cleans the tree`, { timeout: 90_000 }, async () => {
+    assert.ok(checkout);
+    await signalProbe(checkout, 'SIGINT', stage, false, true);
+  });
+}
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  test(`actual two-Index demo ${signal} after both healthy processes cleans its resources`, { timeout: 90_000 }, async () => {
+    assert.ok(checkout);
+    await signalProbe(checkout, signal, 'demo-ready');
+  });
+}
 
 test('withdrawal waits for delayed A as well as already-converged B', async () => {
   let aReads = 0;

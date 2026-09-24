@@ -4,6 +4,7 @@ import { createServer } from 'node:net';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { checkOwnedCancellation, withOwnedLifecycle, type OwnedLifecycle } from './ownedLifecycle.js';
 
 const execFileAsync = promisify(execFile);
 export const INDEX_PUBLIC_REPOSITORY = 'https://github.com/JamesCarnley/nanda-index-v2';
@@ -24,6 +25,7 @@ export type OwnedIndexEnvironment = {
   stopA: () => Promise<void>;
   startA: () => Promise<OwnedIndex>;
   containerId: string;
+  lifecycle: OwnedLifecycle;
 };
 
 function childEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
@@ -36,12 +38,35 @@ export function safeCommandFailure(binary: string, _underlying: unknown): Error 
 }
 
 async function command(binary: string, args: string[], cwd?: string,
-  env: NodeJS.ProcessEnv = childEnv({})): Promise<string> {
+  env: NodeJS.ProcessEnv = childEnv({}), timeout = 120_000): Promise<string> {
   try {
-    const result = await execFileAsync(binary, args, { cwd, env, timeout: 120_000,
+    const result = await execFileAsync(binary, args, { cwd, env, timeout, killSignal: 'SIGKILL',
       maxBuffer: 1024 * 1024, encoding: 'utf8' });
     return result.stdout.trim();
   } catch (error) { throw safeCommandFailure(binary, error); }
+}
+
+type DockerCommand = (args: string[], timeout: number) => Promise<string>;
+/** Resolve once, without changing global context. --host pins every subsequent
+ * operation, including cleanup, even if the saved context changes mid-run. */
+export async function resolveLocalDocker(env: NodeJS.ProcessEnv = process.env,
+  run: DockerCommand = (args, timeout) => command('docker', args, undefined, childEnv({}), timeout)):
+  Promise<{ endpoint: string; command: DockerCommand }> {
+  const config = env['DOCKER_CONFIG'] ? ['--config', env['DOCKER_CONFIG']] : [];
+  const context = env['DOCKER_CONTEXT'];
+  let endpoint: string;
+  if (!context && env['DOCKER_HOST']) endpoint = env['DOCKER_HOST'];
+  else {
+    const selected = context || await run([...config, 'context', 'show'], 10_000);
+    endpoint = await run([...config, 'context', 'inspect', selected,
+      '--format', '{{.Endpoints.docker.Host}}'], 10_000);
+  }
+  // Docker's Unix socket scheme only. No TCP (even loopback), SSH, named pipe,
+  // URL authority, query, fragment, or relative socket path is supported.
+  if (!/^unix:\/\/\/[^\s?#\u0000]+$/.test(endpoint)) {
+    throw new Error('Docker requires an explicitly local Unix socket endpoint; remote contexts are refused');
+  }
+  return { endpoint, command: (args, timeout) => run([...config, '--host', endpoint, ...args], timeout) };
 }
 
 async function port(): Promise<number> {
@@ -56,7 +81,14 @@ async function port(): Promise<number> {
   });
 }
 
-async function stopChild(child: ChildProcess): Promise<void> {
+const childStops = new WeakMap<ChildProcess, Promise<void>>();
+function stopChild(child: ChildProcess): Promise<void> {
+  let stopped = childStops.get(child);
+  if (!stopped) { stopped = stopChildOnce(child); childStops.set(child, stopped); }
+  return stopped;
+}
+
+async function stopChildOnce(child: ChildProcess): Promise<void> {
   if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
   child.kill('SIGTERM');
   if (await waitChildClosed(child, 3_000)) return;
@@ -85,7 +117,7 @@ async function waitChildClosed(child: ChildProcess, timeoutMs: number): Promise<
 export async function settleOwnedCleanup(stoppers: readonly (() => Promise<void>)[],
   removeContainer: () => Promise<void>, initialFailures: readonly unknown[] = []): Promise<void> {
   const failures = [...initialFailures];
-  const stopped = await Promise.allSettled(stoppers.map((stop) => stop()));
+  const stopped = await Promise.allSettled(stoppers.map(async (stop) => stop()));
   for (const result of stopped) if (result.status === 'rejected') failures.push(result.reason);
   try { await removeContainer(); } catch (error) { failures.push(error); }
   if (failures.length > 1) throw new AggregateError(failures, 'owned Index run and cleanup failed');
@@ -117,6 +149,7 @@ async function waitReady(origin: string, child: ChildProcess, sourceId: string,
   spawnError: () => Error | null): Promise<void> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
+    checkOwnedCancellation();
     if (spawnError()) throw new Error('owned Index spawn failed', { cause: spawnError() });
     if (child.exitCode !== null || child.signalCode !== null) throw new Error('owned Index exited before ready');
     try {
@@ -144,35 +177,64 @@ async function waitReady(origin: string, child: ChildProcess, sourceId: string,
 export async function withOwnedIndexes<T>(indexCheckout: string, source: IdentitySourceConfig,
   rpcUrls: { A: string; B: string }, run: (owned: OwnedIndexEnvironment) => Promise<T>,
   options: { serverExecutable?: string } = {}): Promise<T> {
+  return withOwnedLifecycle((lifecycle) => runWithOwnedIndexes(indexCheckout, source, rpcUrls, run, options, lifecycle));
+}
+
+async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySourceConfig,
+  rpcUrls: { A: string; B: string }, run: (owned: OwnedIndexEnvironment) => Promise<T>,
+  options: { serverExecutable?: string }, lifecycle: OwnedLifecycle): Promise<T> {
+  const docker = await resolveLocalDocker();
+  lifecycle.check();
   const checkout = await assertPinnedCheckout(indexCheckout);
   const serverDir = join(checkout, 'server');
   // Do not trust an ignored, previously compiled dist/ from a clean tracked checkout.
+  lifecycle.check();
   await command('npm', ['run', 'build'], serverDir);
+  lifecycle.check();
   const nonce = randomBytes(8).toString('hex');
   const dbA = `city_a_${nonce}`;
   const dbB = `city_b_${nonce}`;
   const password = randomBytes(24).toString('hex');
   const ownedLabel = `city-${nonce}`;
+  const containerName = `nandacity-${nonce}`;
+  let containerAcquisitionStarted = false;
   let containerId = '';
   let a: OwnedIndex | undefined;
   let b: OwnedIndex | undefined;
   let pgPort = 0;
   const processes = new Map<'A' | 'B', ChildProcess>();
+  let closing = false;
+  const pending = new Set<Promise<unknown>>();
+  const active = (): void => {
+    lifecycle.check();
+    if (closing) throw new Error('owned Index scope is closing');
+  };
+  const operation = <R>(runOperation: () => Promise<R>): Promise<R> => {
+    active();
+    const promise = runOperation();
+    pending.add(promise);
+    void promise.then(() => pending.delete(promise), () => pending.delete(promise));
+    return promise;
+  };
 
   async function assertOwned(): Promise<void> {
     if (!containerId) throw new Error('no owned PostgreSQL container');
-    const label = await command('docker', ['inspect', '--format', `{{index .Config.Labels "${LABEL}"}}`, containerId]);
+    const label = await docker.command(['inspect', '--format', `{{index .Config.Labels "${LABEL}"}}`, containerId], 10_000);
     if (label !== ownedLabel) throw new Error('PostgreSQL ownership label mismatch');
   }
   async function sql(statement: string): Promise<void> {
+    active();
     await assertOwned();
-    await command('docker', ['exec', '-e', `PGPASSWORD=${password}`, containerId,
-      'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-c', statement]);
+    active();
+    await docker.command(['exec', '-e', `PGPASSWORD=${password}`, containerId,
+      'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-c', statement], 10_000);
   }
   async function start(name: 'A' | 'B'): Promise<OwnedIndex> {
+    active();
     if (processes.has(name)) throw new Error(`Index ${name} already running`);
     const database = name === 'A' ? dbA : dbB;
     const indexPort = await port();
+    active();
     const origin = `http://127.0.0.1:${indexPort}`;
     const env = childEnv({ NODE_ENV: 'development', PORT: String(indexPort),
       API_BASE_URL: origin, BIND_HOST: '127.0.0.1',
@@ -180,13 +242,14 @@ export async function withOwnedIndexes<T>(indexCheckout: string, source: Identit
       ERC8004_IDENTITY_CONFIG: JSON.stringify({ ...source, rpcUrl: rpcUrls[name], pollMs: 100,
         maxBlockSpan: 200 }) });
     await command('node', ['dist/db/migrate.js'], serverDir, env);
+    active();
     const child = spawn(options.serverExecutable ?? 'node', ['dist/server.js'], { cwd: serverDir, env,
       stdio: ['ignore', 'ignore', 'ignore'] });
     let spawnFailure: Error | null = null;
     child.once('error', (error) => { spawnFailure = error; });
     processes.set(name, child);
     const sourceId = `erc8004-identity:${source.chainId}:${source.registry.toLowerCase()}`;
-    try { await waitReady(origin, child, sourceId, () => spawnFailure); }
+    try { await waitReady(origin, child, sourceId, () => spawnFailure); active(); }
     catch (error) {
       try { await stopChild(child); processes.delete(name); }
       catch (stopError) { throw new AggregateError([error, stopError], 'Index startup and stop failed'); }
@@ -200,8 +263,9 @@ export async function withOwnedIndexes<T>(indexCheckout: string, source: Identit
   }
   async function stopA(): Promise<void> { await a?.stop(); }
   async function startA(): Promise<OwnedIndex> { a = await start('A'); return a; }
-  async function restartA(): Promise<OwnedIndex> { await stopA(); return startA(); }
+  async function restartA(): Promise<OwnedIndex> { active(); await stopA(); return startA(); }
   async function rebuildA(): Promise<OwnedIndex> {
+    active();
     await stopA();
     await sql(`DROP DATABASE ${dbA} WITH (FORCE)`);
     await sql(`CREATE DATABASE ${dbA}`);
@@ -211,18 +275,26 @@ export async function withOwnedIndexes<T>(indexCheckout: string, source: Identit
   let result!: T;
   const runFailures: unknown[] = [];
   try {
-    containerId = await command('docker', ['run', '-d', '--label', `${LABEL}=${ownedLabel}`,
-      '-e', `POSTGRES_PASSWORD=${password}`, '-p', '127.0.0.1::5432', 'postgres:16']);
+    active();
+    containerAcquisitionStarted = true;
+    // Record the returned ID before checking cancellation. A deterministic name
+    // also recovers ownership if Docker mutates successfully but its receipt fails.
+    containerId = await docker.command(['run', '-d', '--name', containerName, '--label', `${LABEL}=${ownedLabel}`,
+      '-e', `POSTGRES_PASSWORD=${password}`, '-p', '127.0.0.1::5432', 'postgres:16'], 120_000);
+    active();
     await assertOwned();
-    const binding = await command('docker', ['port', containerId, '5432/tcp']);
+    active();
+    const binding = await docker.command(['port', containerId, '5432/tcp'], 10_000);
     const match = /^127\.0\.0\.1:(\d+)$/.exec(binding);
     if (!match) throw new Error('PostgreSQL must publish only on loopback');
     pgPort = Number(match[1]);
     const deadline = Date.now() + 15_000;
     for (;;) {
-      const logs = await command('docker', ['logs', containerId]);
+      active();
+      const logs = await docker.command(['logs', containerId], 10_000);
       if (logs.includes('PostgreSQL init process complete; ready for start up.')) {
-        try { await command('docker', ['exec', containerId, 'pg_isready', '-U', 'postgres']); break; }
+        active();
+        try { await docker.command(['exec', containerId, 'pg_isready', '-U', 'postgres'], 10_000); break; }
         catch { /* final post-init server not ready yet */ }
       }
       if (Date.now() > deadline) throw new Error('owned PostgreSQL not ready');
@@ -232,12 +304,25 @@ export async function withOwnedIndexes<T>(indexCheckout: string, source: Identit
     await sql(`CREATE DATABASE ${dbB}`);
     a = await start('A');
     b = await start('B');
-    result = await run({ indexes: { A: a, B: b }, restartA, rebuildA,
-      stopA, startA, containerId });
+    active();
+    result = await run({ indexes: { A: a, B: b },
+      restartA: () => operation(restartA), rebuildA: () => operation(rebuildA),
+      stopA: () => operation(stopA), startA: () => operation(startA), containerId, lifecycle });
   } catch (error) { runFailures.push(error); }
+  closing = true;
+  // Even a callback that forgets to await a lifecycle operation cannot let its
+  // in-flight acquisition race teardown or create a new child after closing.
+  for (const outcome of await Promise.allSettled([...pending])) {
+    if (outcome.status === 'rejected') runFailures.push(outcome.reason);
+  }
   await settleOwnedCleanup([...processes.values()].map((child) => () => stopChild(child)),
     async () => {
-      if (containerId) { await assertOwned(); await command('docker', ['rm', '-f', containerId]); }
+      if (containerAcquisitionStarted && !containerId) {
+        containerId = await docker.command(['ps', '-aq', '--no-trunc', '--filter',
+          `name=^/${containerName}$`], 10_000);
+        if (containerId && !/^[0-9a-f]{64}$/.test(containerId)) throw new Error('ambiguous owned container lookup');
+      }
+      if (containerId) { await assertOwned(); await docker.command(['rm', '-f', containerId], 10_000); }
     }, runFailures);
   return result;
 }

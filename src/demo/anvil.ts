@@ -4,6 +4,7 @@ import { createServer } from 'node:net';
 import { promisify } from 'node:util';
 
 import { createPublicClient, http } from 'viem';
+import { checkOwnedCancellation, withOwnedLifecycle, type OwnedLifecycle } from './ownedLifecycle.js';
 
 const execFileAsync = promisify(execFile);
 const EXPECTED_ANVIL_VERSION = '1.7.1';
@@ -135,6 +136,7 @@ async function waitForReady(
   let lastError: unknown;
 
   while (Date.now() < deadline) {
+    checkOwnedCancellation();
     try {
       const chainId = await client.getChainId();
       if (chainId !== 31_337) {
@@ -226,11 +228,20 @@ export function createOwnedProcessStopper(
 }
 
 export async function withOwnedAnvil<T>(
-  run: (rpcUrl: string) => Promise<T>,
+  run: (rpcUrl: string, lifecycle: OwnedLifecycle) => Promise<T>,
   options: OwnedAnvilOptions = {},
+): Promise<OwnedAnvilResult<T>> {
+  return withOwnedLifecycle((lifecycle) => runWithOwnedAnvil(run, options, lifecycle));
+}
+
+async function runWithOwnedAnvil<T>(
+  run: (rpcUrl: string, lifecycle: OwnedLifecycle) => Promise<T>,
+  options: OwnedAnvilOptions,
+  lifecycle: OwnedLifecycle,
 ): Promise<OwnedAnvilResult<T>> {
   const binary = options.anvilBinary ?? 'anvil';
   await assertAnvilVersion(binary);
+  lifecycle.check();
 
   const marker = options.genesisMarker ?? randomGenesisMarker();
   assertGenesisMarker(marker);
@@ -240,6 +251,7 @@ export async function withOwnedAnvil<T>(
   }
   const rpcUrl = `http://127.0.0.1:${port}`;
   assertLocalWriteRpcUrl(rpcUrl);
+  lifecycle.check();
 
   const child = spawn(
     binary,
@@ -274,27 +286,20 @@ export async function withOwnedAnvil<T>(
 
   const stop = createOwnedProcessStopper(child);
 
-  const signalHandlers = new Map<NodeJS.Signals, () => void>();
-  const removeSignalHandlers = () => {
-    for (const [signal, handler] of signalHandlers) {
-      process.off(signal, handler);
-    }
-  };
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    const handler = () => {
-      removeSignalHandlers();
-      void stop().finally(() => process.kill(process.pid, signal));
-    };
-    signalHandlers.set(signal, handler);
-    process.once(signal, handler);
-  }
-
+  let failure: unknown;
   try {
     await waitForReady(child, rpcUrl, marker, () => spawnError);
-    const value = await run(rpcUrl);
+    lifecycle.check();
+    const value = await run(rpcUrl, lifecycle);
     return { value, rpcUrl, processId };
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    removeSignalHandlers();
-    await stop();
+    try { await stop(); }
+    catch (error) {
+      if (failure) throw new AggregateError([failure, error], 'owned Anvil run and cleanup failed');
+      throw error;
+    }
   }
 }
