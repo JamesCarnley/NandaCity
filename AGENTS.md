@@ -28,7 +28,8 @@ discovery demonstration:
 - an owned, ephemeral Anvil deployment of the pinned reference registry;
 - bounded configured-origin Index search and immutable observation reads;
 - independently derived declaration/filter checks against separately obtained
-  chain authority and exact AgentCard bytes; and
+  chain authority and exact AgentCard bytes, within a caller-selected chain and
+  registry domain; and
 - a local two-Index fixture using distinct disposable PostgreSQL databases.
 
 Do not describe snapshot verification as current chain truth, liveness, safety,

@@ -59,7 +59,9 @@ npm run demo:discovery -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 ```
 
 `NANDA_INDEX_CHECKOUT` is required for `npm run test:integration` and
-`npm run check`. The checkout must have the exact
+`npm run check`. Supply the checkout's canonical absolute path (for example,
+macOS `/private/tmp/...`, not its `/tmp/...` symlink; `realpath` can show it).
+The checkout must have the exact
 pinned commit and no tracked/untracked changes; the harness rebuilds its Index
 server from source before launch. The tests do not silently skip Anvil, Docker,
 or the Index checkout. `npm run check` runs typechecking, all unit tests, the

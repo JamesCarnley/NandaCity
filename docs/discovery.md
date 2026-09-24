@@ -11,7 +11,9 @@ launch.
 
 Requires Node 24, Anvil 1.7.1, Docker, and an installed clean checkout of the
 pinned public Index source. In the Index checkout, run `npm ci` in `server/`.
-Then from City:
+Use its canonical absolute path: on macOS, `/tmp/...` resolves through a
+symlink to `/private/tmp/...`, so pass the latter (`realpath` shows it). Then
+from City:
 
 ```sh
 npm ci
@@ -67,8 +69,12 @@ read remains `unavailable`, not a negative service assertion.
 `verifyDiscovery` is pure. It checks the exact URI and AgentCard bytes with
 City's existing profile verifier, active status, a caller-supplied authority
 snapshot, all normalized declaration fields, and the requested exact filters.
-`verifyDiscoveryAtCurrentChain` obtains a fresh block-qualified snapshot from
-an independently configured RPC before the pure check. An old record may still
+`verifyDiscoveryWithCard` and `verifyDiscoveryAtCurrentChain` require an explicit
+caller-selected chain ID and registry. They reject candidates outside that
+domain before fetching a card or reading the chain; the demo supplies its own
+deployed registry from trusted setup, never from the Index candidate. The
+workflow checks the independent RPC's chain ID, then obtains a fresh
+block-qualified snapshot before the pure check. An old record may still
 verify against an explicitly old basis, but not against changed current URI or
 ownership. Neither RPC evidence nor Index coverage is a cryptographic state
 proof, liveness check, reputation judgment, or endorsement. The demo fetches

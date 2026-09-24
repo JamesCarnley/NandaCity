@@ -18,6 +18,12 @@ export type DiscoveryVerification =
   | { status: 'verified'; profile: VerifiedProfile; observerOrigin: string }
   | { status: 'rejected'; reason: string; observerOrigin: string }
   | { status: 'unavailable'; reason: string; observerOrigin: string };
+export type IdentityDomain = Pick<AgentRef, 'chainId' | 'registry'>;
+
+function matchesDomain(candidate: DiscoveredCandidate, domain: IdentityDomain): boolean {
+  return candidate.agent.chainId === domain.chainId &&
+    candidate.agent.registry.toLowerCase() === domain.registry.toLowerCase();
+}
 
 function normalized(values: string[]): string[] {
   return [...new Set(values)].sort();
@@ -77,10 +83,16 @@ export function verifyDiscovery(candidate: DiscoveredCandidate, basis: Authority
 
 /** Separately configured RPC is needed for current-state evidence; failures are unavailable, not rejected. */
 export async function verifyDiscoveryAtCurrentChain(candidate: DiscoveredCandidate,
-  chainClient: PublicClient, cardBytes: Uint8Array, filter: ServiceFilter): Promise<DiscoveryVerification> {
+  chainClient: PublicClient, domain: IdentityDomain, cardBytes: Uint8Array,
+  filter: ServiceFilter): Promise<DiscoveryVerification> {
+  if (!matchesDomain(candidate, domain)) return { status: 'rejected',
+    reason: 'candidate outside client-selected identity domain',
+    observerOrigin: candidate.observerOrigin };
   let basis: AuthoritySnapshot;
   let observedBlock: Awaited<ReturnType<PublicClient['getBlock']>>;
   try {
+    if (await chainClient.getChainId() !== domain.chainId) return { status: 'unavailable',
+      reason: 'independent RPC is not the selected chain', observerOrigin: candidate.observerOrigin };
     observedBlock = await chainClient.getBlock({ blockNumber: BigInt(candidate.observationBlock.number) });
     basis = await readIdentitySnapshot(chainClient, candidate.agent);
   }
@@ -96,11 +108,14 @@ export async function verifyDiscoveryAtCurrentChain(candidate: DiscoveredCandida
 
 /** Transport failures remain unavailable; the caller supplies an explicitly scoped card reader. */
 export async function verifyDiscoveryWithCard(candidate: DiscoveredCandidate,
-  chainClient: PublicClient, filter: ServiceFilter,
+  chainClient: PublicClient, domain: IdentityDomain, filter: ServiceFilter,
   readCard: (url: string) => Promise<Uint8Array>): Promise<DiscoveryVerification> {
+  if (!matchesDomain(candidate, domain)) return { status: 'rejected',
+    reason: 'candidate outside client-selected identity domain',
+    observerOrigin: candidate.observerOrigin };
   let bytes: Uint8Array;
   try { bytes = await readCard(candidate.declaration.url); }
   catch { return { status: 'unavailable', reason: 'card fetch failed',
     observerOrigin: candidate.observerOrigin }; }
-  return verifyDiscoveryAtCurrentChain(candidate, chainClient, bytes, filter);
+  return verifyDiscoveryAtCurrentChain(candidate, chainClient, domain, bytes, filter);
 }

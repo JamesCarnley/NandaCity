@@ -7,9 +7,17 @@ import { createPublicClient, http } from 'viem';
 
 import { withOwnedAnvil } from '../../src/demo/anvil.js';
 import { withOwnedIndexes } from '../../src/demo/indexProcesses.js';
-import { runTwoIndexDemo } from '../../src/demo/twoIndexes.js';
+import { runTwoIndexDemo, waitForBothWithdrawals } from '../../src/demo/twoIndexes.js';
 
 const checkout = process.env['NANDA_INDEX_CHECKOUT'];
+
+test('withdrawal waits for delayed A as well as already-converged B', async () => {
+  let aReads = 0;
+  const result = await waitForBothWithdrawals(async () => ++aReads === 1 ? 3 : 2,
+    async () => 2, 2, 'delayed A withdrawal');
+  assert.deepEqual(result, { a: 2, b: 2 });
+  assert.equal(aReads, 2);
+});
 
 test('six services converge through two real Index processes and owned resources clean up',
   { timeout: 180_000 }, async () => {
@@ -53,4 +61,31 @@ test('callback failure stops only its owned Index processes and PostgreSQL conta
     for (const origin of origins) {
       await assert.rejects(fetch(`${origin}/health`, { signal: AbortSignal.timeout(500) }));
     }
+  });
+
+test('actual failed Index spawn rejects and removes its newly owned PostgreSQL container',
+  { timeout: 90_000 }, async () => {
+    assert.ok(checkout);
+    const listed = (): string[] => execFileSync('docker', ['ps', '-a', '--filter',
+      'label=org.nandacity.owned-demo', '--format', '{{.ID}}'], { encoding: 'utf8' })
+      .trim().split('\n').filter(Boolean).sort();
+    const before = listed();
+    let callbackRan = false;
+    const marker = { blockNumber: 0n,
+      timestamp: BigInt(Math.floor(Date.now() / 1000)) + BigInt(randomBytes(3).readUIntBE(0, 3)) };
+    await assert.rejects(withOwnedAnvil(async (rpcUrl) => {
+      const client = createPublicClient({ transport: http(rpcUrl) });
+      const genesis = await client.getBlock({ blockNumber: 0n });
+      assert.ok(genesis.hash);
+      await withOwnedIndexes(checkout, {
+        chainId: 31_337, registry: '0x1111111111111111111111111111111111111111',
+        genesisHash: genesis.hash, startBlock: '0', adapter: 'nandacity-0.1',
+        confirmations: 0,
+      }, { A: rpcUrl, B: rpcUrl }, async () => {
+        callbackRan = true;
+        throw new Error('server callback must not run after failed spawn');
+      }, { serverExecutable: '/definitely/not/a/node/binary' });
+    }, { genesisMarker: marker }), /owned Index spawn failed|ENOENT/);
+    assert.equal(callbackRan, false);
+    assert.deepEqual(listed(), before);
   });

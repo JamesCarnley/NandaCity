@@ -11,6 +11,7 @@ import {
 
 const chicago = 'https://www.wikidata.org/entity/Q1297';
 const filter = { areaServed: [chicago] };
+const trustedDomain = { chainId: originalAgent.chainId, registry: originalAgent.registry };
 const declaration = {
   identifier: `eip155:11155111/erc721:${originalAgent.registry}/7`,
   displayName: 'NANDA City Chicago Planner',
@@ -85,7 +86,7 @@ test('separate unavailable chain connection does not become a rejected candidate
   const offline = createPublicClient({ transport: http('http://127.0.0.1:1', {
     retryCount: 0, timeout: 200 }) });
   const verdict = await verifyDiscoveryAtCurrentChain(candidate, offline,
-    bytesFor(originalCard), filter);
+    trustedDomain, bytesFor(originalCard), filter);
   assert.equal(verdict.status, 'unavailable');
   assert.equal(verdict.observerOrigin, candidate.observerOrigin);
 });
@@ -93,8 +94,27 @@ test('separate unavailable chain connection does not become a rejected candidate
 test('unavailable card transport is not reported as a profile rejection', async () => {
   const offline = createPublicClient({ transport: http('http://127.0.0.1:1', {
     retryCount: 0, timeout: 200 }) });
-  const verdict = await verifyDiscoveryWithCard(candidate, offline, filter,
+  const verdict = await verifyDiscoveryWithCard(candidate, offline, trustedDomain, filter,
     async () => { throw new Error('owned card service unavailable'); });
   assert.equal(verdict.status, 'unavailable');
   assert.match(verdict.status === 'unavailable' ? verdict.reason : '', /card fetch/);
+});
+
+test('client-selected identity domain rejects a foreign registry before card or chain I/O', async () => {
+  const foreign = { ...candidate, agent: { ...candidate.agent,
+    registry: '0x9999999999999999999999999999999999999999' as const } };
+  const offline = createPublicClient({ transport: http('http://127.0.0.1:1', {
+    retryCount: 0, timeout: 200 }) });
+  let cardReads = 0;
+  const verdict = await verifyDiscoveryWithCard(foreign, offline, trustedDomain, filter,
+    async () => { cardReads++; return bytesFor(originalCard); });
+  assert.equal(verdict.status, 'rejected');
+  assert.equal(cardReads, 0);
+  const direct = await verifyDiscoveryAtCurrentChain(foreign, offline, trustedDomain,
+    bytesFor(originalCard), filter);
+  assert.equal(direct.status, 'rejected');
+  const foreignChain = { ...candidate, agent: { ...candidate.agent, chainId: 31337 } };
+  assert.equal((await verifyDiscoveryWithCard(foreignChain, offline, trustedDomain, filter,
+    async () => { cardReads++; return bytesFor(originalCard); })).status, 'rejected');
+  assert.equal(cardReads, 0);
 });

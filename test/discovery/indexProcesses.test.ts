@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { assertOwnedIndexReady, safeCommandFailure } from '../../src/demo/indexProcesses.js';
+import { assertOwnedIndexReady, safeCommandFailure, settleOwnedCleanup } from '../../src/demo/indexProcesses.js';
 
 test('readiness rejects a different server origin or identity source', () => {
   const origin = 'http://127.0.0.1:31001';
@@ -21,4 +21,16 @@ test('child command failures do not expose ephemeral database credentials', () =
   const reported = safeCommandFailure('docker', underlying);
   assert.match(reported.message, /docker failed/);
   assert.equal(reported.message.includes('secret-value'), false);
+});
+
+test('cleanup attempts every stopper and owned container removal, preserving failures', async () => {
+  const attempted: string[] = [];
+  await assert.rejects(settleOwnedCleanup([
+    async () => { attempted.push('A'); throw new Error('A stop failed'); },
+    async () => { attempted.push('B'); },
+  ], async () => { attempted.push('container'); }, [new Error('scenario failed')]),
+  (error: unknown) => error instanceof AggregateError && error.errors.length === 2 &&
+    error.errors[0]?.message === 'scenario failed' &&
+    error.errors[1]?.message === 'A stop failed');
+  assert.deepEqual(attempted, ['A', 'B', 'container']);
 });

@@ -57,13 +57,39 @@ async function port(): Promise<number> {
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
   child.kill('SIGTERM');
-  const exited = await Promise.race([new Promise<boolean>((resolve) => child.once('exit', () => resolve(true))),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3_000))]);
-  if (exited) return;
+  if (await waitChildClosed(child, 3_000)) return;
   child.kill('SIGKILL');
-  await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  if (!await waitChildClosed(child, 3_000)) throw new Error('owned Index did not close after SIGKILL');
+}
+
+async function waitChildClosed(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise<boolean>((resolve) => {
+    const finish = (closed: boolean): void => {
+      clearTimeout(timer);
+      child.off('exit', onClose);
+      child.off('close', onClose);
+      resolve(closed);
+    };
+    const onClose = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onClose);
+    child.once('close', onClose);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+  });
+}
+
+/** Every owned cleanup is attempted even when a preceding one fails. */
+export async function settleOwnedCleanup(stoppers: readonly (() => Promise<void>)[],
+  removeContainer: () => Promise<void>, initialFailures: readonly unknown[] = []): Promise<void> {
+  const failures = [...initialFailures];
+  const stopped = await Promise.allSettled(stoppers.map((stop) => stop()));
+  for (const result of stopped) if (result.status === 'rejected') failures.push(result.reason);
+  try { await removeContainer(); } catch (error) { failures.push(error); }
+  if (failures.length > 1) throw new AggregateError(failures, 'owned Index run and cleanup failed');
+  if (failures.length === 1) throw failures[0];
 }
 
 async function assertPinnedCheckout(indexCheckout: string): Promise<string> {
@@ -87,9 +113,11 @@ export function assertOwnedIndexReady(body: unknown, origin: string, sourceId: s
   }
 }
 
-async function waitReady(origin: string, child: ChildProcess, sourceId: string): Promise<void> {
+async function waitReady(origin: string, child: ChildProcess, sourceId: string,
+  spawnError: () => Error | null): Promise<void> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
+    if (spawnError()) throw new Error('owned Index spawn failed', { cause: spawnError() });
     if (child.exitCode !== null || child.signalCode !== null) throw new Error('owned Index exited before ready');
     try {
       const health = await fetch(`${origin}/health`, { signal: AbortSignal.timeout(500) });
@@ -114,7 +142,8 @@ async function waitReady(origin: string, child: ChildProcess, sourceId: string):
 }
 
 export async function withOwnedIndexes<T>(indexCheckout: string, source: IdentitySourceConfig,
-  rpcUrls: { A: string; B: string }, run: (owned: OwnedIndexEnvironment) => Promise<T>): Promise<T> {
+  rpcUrls: { A: string; B: string }, run: (owned: OwnedIndexEnvironment) => Promise<T>,
+  options: { serverExecutable?: string } = {}): Promise<T> {
   const checkout = await assertPinnedCheckout(indexCheckout);
   const serverDir = join(checkout, 'server');
   // Do not trust an ignored, previously compiled dist/ from a clean tracked checkout.
@@ -151,12 +180,18 @@ export async function withOwnedIndexes<T>(indexCheckout: string, source: Identit
       ERC8004_IDENTITY_CONFIG: JSON.stringify({ ...source, rpcUrl: rpcUrls[name], pollMs: 100,
         maxBlockSpan: 200 }) });
     await command('node', ['dist/db/migrate.js'], serverDir, env);
-    const child = spawn('node', ['dist/server.js'], { cwd: serverDir, env,
+    const child = spawn(options.serverExecutable ?? 'node', ['dist/server.js'], { cwd: serverDir, env,
       stdio: ['ignore', 'ignore', 'ignore'] });
+    let spawnFailure: Error | null = null;
+    child.once('error', (error) => { spawnFailure = error; });
     processes.set(name, child);
     const sourceId = `erc8004-identity:${source.chainId}:${source.registry.toLowerCase()}`;
-    try { await waitReady(origin, child, sourceId); }
-    catch (error) { await stopChild(child); processes.delete(name); throw error; }
+    try { await waitReady(origin, child, sourceId, () => spawnFailure); }
+    catch (error) {
+      try { await stopChild(child); processes.delete(name); }
+      catch (stopError) { throw new AggregateError([error, stopError], 'Index startup and stop failed'); }
+      throw error;
+    }
     return { name, origin, database, stop: async () => {
       if (processes.get(name) !== child) return;
       await stopChild(child);
@@ -173,6 +208,8 @@ export async function withOwnedIndexes<T>(indexCheckout: string, source: Identit
     return startA();
   }
 
+  let result!: T;
+  const runFailures: unknown[] = [];
   try {
     containerId = await command('docker', ['run', '-d', '--label', `${LABEL}=${ownedLabel}`,
       '-e', `POSTGRES_PASSWORD=${password}`, '-p', '127.0.0.1::5432', 'postgres:16']);
@@ -195,10 +232,12 @@ export async function withOwnedIndexes<T>(indexCheckout: string, source: Identit
     await sql(`CREATE DATABASE ${dbB}`);
     a = await start('A');
     b = await start('B');
-    return await run({ indexes: { A: a, B: b }, restartA, rebuildA,
+    result = await run({ indexes: { A: a, B: b }, restartA, rebuildA,
       stopA, startA, containerId });
-  } finally {
-    await Promise.all([...processes.values()].map(stopChild));
-    if (containerId) { await assertOwned(); await command('docker', ['rm', '-f', containerId]); }
-  }
+  } catch (error) { runFailures.push(error); }
+  await settleOwnedCleanup([...processes.values()].map((child) => () => stopChild(child)),
+    async () => {
+      if (containerId) { await assertOwned(); await command('docker', ['rm', '-f', containerId]); }
+    }, runFailures);
+  return result;
 }

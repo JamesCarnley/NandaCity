@@ -8,7 +8,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --import tsx --test test/identity/anvil.test.ts test/identity/profile.test.ts test/identity/registry.test.ts test/identity/verify.test.ts test/discovery/cardFetch.test.ts test/discovery/cli.test.ts test/discovery/indexClient.test.ts test/discovery/indexProcesses.test.ts test/discovery/verifyDiscovery.test.ts",
+    "test": "node --import tsx --test test/identity/anvil.test.ts test/identity/profile.test.ts test/identity/registry.test.ts test/identity/verify.test.ts test/discovery/cardFetch.test.ts test/discovery/cli.test.ts test/discovery/indexClient.test.ts test/discovery/indexProcesses.test.ts test/discovery/ownedProxy.test.ts test/discovery/verifyDiscovery.test.ts",
     "test:integration": "node --import tsx --test test/identity/registry.integration.test.ts test/discovery/twoIndexes.integration.test.ts",
     "contracts:check": "node --import tsx scripts/check-reference-contracts.ts",
     "demo:identity": "node --import tsx src/cli.ts identity demo",
