@@ -103,15 +103,16 @@ Retained evidence is not erased by key rotation, but uncertain history must not
 silently become qualified cross-epoch reputation. A local Anvil result proves
 only what the selected local chain and fixture actually showed.
 
-## Planned A2A transport boundary
+## Implemented A2A transport boundary
 
-The first runtime slice will use A2A 0.3 JSON-RPC `message/send` with the signed
-request in a data part, return a `Task` with persisted signed acceptance, and
-support `tasks/get` polling. A completed task will carry plan bytes and linked
-signed completion; an error after acceptance will become a retained failed task.
-Those endpoints are not implemented by the signed-format modules alone. A City
+The first runtime slice uses A2A 0.3 JSON-RPC `message/send` with the signed
+request in a data part, returns a `Task` with persisted signed acceptance, and
+supports `tasks/get` polling. A completed task carries exact plan bytes and a
+linked signed completion; an error after acceptance becomes a retained failed
+task. A City
 signature in a message body does **not** authenticate `tasks/get`. Local demo
 polling is restricted to an owned loopback endpoint; a deployed service needs
 explicit per-request HTTP authentication and authorization. The initial subset
 is not advertised as full A2A conformance (for example, `tasks/cancel` is not
-implemented). See the [A2A 0.3 specification](https://a2a-protocol.org/v0.3.0/specification/).
+implemented). See [runtime details](a2a-loopback.md) and the
+[A2A 0.3 specification](https://a2a-protocol.org/v0.3.0/specification/).

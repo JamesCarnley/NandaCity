@@ -1,9 +1,10 @@
 # NANDA City
 
 NANDA City provides an identity/profile foundation, a real local ERC-8004
-registry demonstration, and a two-Index local discovery fixture. It does
-**not** provide public-chain deployment, real operator onboarding, service
-invocation, receipts, reputation, a user interface, or a deployed service.
+registry demonstration, a two-Index local discovery fixture, a signed
+request/acceptance/completion format, and an owned loopback A2A task service.
+It does **not** provide public-chain deployment, real operator onboarding,
+reputation, a user interface, or a deployed service.
 
 The companion [NANDA Index fork](https://github.com/JamesCarnley/nanda-index-v2)
 provides exact per-service filtering and optional, read-only ERC-8004 following.
@@ -181,14 +182,16 @@ compiler output.
   finality.
 - A successful result does not claim that an agent is currently live, safe,
   trusted, endorsed, synchronized by an Index, or producing service results.
-- `receiptSigner` is declared in the profile only. No receipt or signing model is
-  implemented here.
+- `receiptSigner` is a separate runtime key authorized only for City's signed
+  acceptance and completion statements. It is not an owner or payment key.
 
 The broader City vision—finding a specialist, invoking it, inspecting provenance,
 and leaving portable feedback—remains future work. Public-chain writes, Index
-deployment, real service adapters, signing schemes, and reputation remain outside
-this slice. The local Index connector and independent City verification are
-demonstrated; they are not a production metadata fetcher or a trust verdict.
+deployment, real service adapters, additional signing schemes, transport
+authentication, and reputation remain outside this slice. The local Index
+connector and independent City verification are demonstrated; they are not a
+production metadata fetcher or a trust verdict. See the
+[loopback A2A boundary](docs/a2a-loopback.md).
 
 ## Source layout
 
@@ -200,7 +203,13 @@ demonstrated; they are not a production metadata fetcher or a trust verdict.
   identity and two-Index acceptance stories with owned local resources.
 - `src/discovery/`: bounded Index search/observation reads and independent
   declaration/profile verification.
+- `src/interaction/`: exact-byte statements, scoped EIP-712 signatures, and
+  linked evidence verification.
+- `src/a2a/`: owned loopback A2A 0.3 JSON-RPC subset and durable task store.
 - `docs/discovery.md`: source pin, execution, coverage, and limits.
+- `docs/interaction-format.md`: signed City interaction contract and limits.
+- `docs/a2a-loopback.md`: implemented task-service wire, durability, and auth
+  boundary.
 - `src/cli.ts`: plain and JSON command output with nonzero failure status.
 - `test/identity/`: public fixtures, unit tests, and the actual Anvil integration
   suite.
