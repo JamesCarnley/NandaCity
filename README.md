@@ -1,16 +1,15 @@
 # NANDA City
 
-NANDA City currently provides an identity/profile foundation and a real local
-ERC-8004 Identity Registry demonstration for a future city-specialist agent
-experience. It does **not** provide discovery, public-chain deployment, service
+NANDA City provides an identity/profile foundation, a real local ERC-8004
+registry demonstration, and a two-Index local discovery fixture. It does
+**not** provide public-chain deployment, real operator onboarding, service
 invocation, receipts, reputation, a user interface, or a deployed service.
 
-The companion [NANDA Index fork](https://github.com/JamesCarnley/nanda-index-v2#structured-service-discovery)
-provides exact per-service capability, service-area and interface filtering,
-organization-admin publishing, and source-qualified results. It is useful without
-Ethereum or reputation. Connecting these Index projections to City's ERC-8004
-profiles across two independently persisted Index instances is the next
-integration step; that connection is not implemented yet.
+The companion [NANDA Index fork](https://github.com/JamesCarnley/nanda-index-v2)
+provides exact per-service filtering and optional, read-only ERC-8004 following.
+The local City fixture publishes six profiles on its own Anvil and launches two
+actual Index processes with separate PostgreSQL databases and followers. The
+Index remains useful without Ethereum or reputation. See [discovery details](docs/discovery.md).
 
 The codec validates an embedded ERC-8004 registration-v1 document, City's
 namespaced profile fields, and the selected minimal A2A 0.3 AgentCard shape. The
@@ -23,11 +22,16 @@ it does not fetch an AgentCard URL.
 - Node.js 24 or newer
 - npm
 - Anvil 1.7.1 from Foundry, on `PATH`, for integration checks and the demo
+- Docker with the `postgres:16` image available (or permission to pull it) for
+  the two-Index integration check and demo
+- A clean checkout of public `JamesCarnley/nanda-index-v2` at pinned commit
+  `94dca70d86fcd915d8f6e46442e1e3a71ebb9ce7`, with `npm ci` run in its
+  `server/` directory
 
-The local process workflow is verified on macOS and in
-[Linux CI](https://github.com/JamesCarnley/NandaCity/actions/runs/35251688937),
-including the actual-Anvil integration tests. Install the pinned Foundry release
-with:
+The earlier identity-only process workflow was verified on macOS and in
+[historical Linux CI](https://github.com/JamesCarnley/NandaCity/actions/runs/35251688937),
+including actual-Anvil tests. That run predates the two-Index discovery fixture;
+it is not Linux evidence for this milestone. Install the pinned Foundry release with:
 
 ```sh
 foundryup --install v1.7.1
@@ -38,7 +42,11 @@ No paid account, hosted RPC, wallet, API key, or environment secret is needed.
 ## Setup and checks
 
 ```sh
+git clone https://github.com/JamesCarnley/nanda-index-v2 /absolute/path/to/nanda-index-v2
+git -C /absolute/path/to/nanda-index-v2 checkout 94dca70d86fcd915d8f6e46442e1e3a71ebb9ce7
+npm ci --prefix /absolute/path/to/nanda-index-v2/server
 npm ci
+export NANDA_INDEX_CHECKOUT=/absolute/path/to/nanda-index-v2
 npm test
 npm run test:integration
 npm run contracts:check
@@ -47,19 +55,22 @@ npm run --silent demo:identity -- --json
 npm run typecheck
 npm run build
 npm run check
+npm run demo:discovery -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 ```
 
-`npm test` is the fast unit suite. `npm run test:integration` is the explicit
-real-chain suite and fails with setup guidance if Anvil is unavailable; it never
-silently skips. `npm run check` deliberately runs typechecking, unit tests, the
-production build, and that integration suite. Generated TypeScript files are
-written to `dist/` and are not committed.
+`NANDA_INDEX_CHECKOUT` is required for `npm run test:integration` and
+`npm run check`. The checkout must have the exact
+pinned commit and no tracked/untracked changes; the harness rebuilds its Index
+server from source before launch. The tests do not silently skip Anvil, Docker,
+or the Index checkout. `npm run check` runs typechecking, all unit tests, the
+production build, and both real-chain integration suites. Generated TypeScript
+files are written to `dist/` and are not committed.
 
 `npm run demo:identity` prints a plain summary. Add `--json` as shown above for
 machine-readable output; `--silent` suppresses npm's lifecycle banner so stdout
 is JSON only. A failed acceptance assertion exits nonzero.
 
-## What the local demonstration does
+## What the identity demonstration does
 
 The command compiles the pinned upstream sources, starts its own Anvil process
 on an available loopback port with chain ID 31337, and generates temporary demo
@@ -148,8 +159,9 @@ compiler output.
 
 The broader City vision—finding a specialist, invoking it, inspecting provenance,
 and leaving portable feedback—remains future work. Public-chain writes, Index
-connectors, service adapters, signing schemes, and reputation remain outside this
-slice.
+deployment, real service adapters, signing schemes, and reputation remain outside
+this slice. The local Index connector and independent City verification are
+demonstrated; they are not a production metadata fetcher or a trust verdict.
 
 ## Source layout
 
@@ -158,7 +170,10 @@ slice.
 - `src/identity/verify.ts`: snapshot-bound, I/O-free profile verification.
 - `src/identity/registry.ts`: chain-ID-checked, block-qualified registry reads.
 - `src/demo/`: pinned contract compilation, owned-Anvil lifecycle, and the local
-  acceptance story.
+  identity and two-Index acceptance stories with owned local resources.
+- `src/discovery/`: bounded Index search/observation reads and independent
+  declaration/profile verification.
+- `docs/discovery.md`: source pin, execution, coverage, and limits.
 - `src/cli.ts`: plain and JSON command output with nonzero failure status.
 - `test/identity/`: public fixtures, unit tests, and the actual Anvil integration
   suite.

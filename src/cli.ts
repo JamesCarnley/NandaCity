@@ -1,9 +1,11 @@
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { runIdentityDemo, type IdentityDemoResult } from './demo/identity.js';
+import { runTwoIndexDemo } from './demo/twoIndexes.js';
 
 const usage = 'Usage: npm run demo:identity -- [--json]';
+const discoveryUsage = 'Usage: npm run demo:discovery -- --index-checkout /absolute/path [--json]';
 
 export function formatIdentityDemoJson(result: IdentityDemoResult): string {
   return JSON.stringify(result, null, 2);
@@ -41,6 +43,29 @@ export async function runCli(
   output: Pick<NodeJS.WriteStream, 'write'> = process.stdout,
   errorOutput: Pick<NodeJS.WriteStream, 'write'> = process.stderr,
 ): Promise<number> {
+  if (args[0] === 'discovery' && args[1] === 'demo') {
+    const indexFlag = args.indexOf('--index-checkout');
+    const checkout = indexFlag >= 0 ? args[indexFlag + 1] : undefined;
+    const remaining = args.slice(2).filter((argument, index) =>
+      argument !== '--json' && index + 2 !== indexFlag && index + 2 !== indexFlag + 1);
+    if (!checkout || !isAbsolute(checkout) || remaining.length > 0 ||
+      args.filter((argument) => argument === '--index-checkout').length !== 1 ||
+      args.filter((argument) => argument === '--json').length > 1) {
+      errorOutput.write(`${discoveryUsage}\n`);
+      if (checkout && !isAbsolute(checkout)) errorOutput.write('Index checkout must be absolute.\n');
+      return 2;
+    }
+    try {
+      const result = await runTwoIndexDemo(checkout);
+      const failed = Object.entries(result.acceptance).filter(([, accepted]) => !accepted);
+      if (failed.length > 0) throw new Error(`discovery acceptance failed: ${failed.map(([name]) => name).join(', ')}`);
+      output.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    } catch (error) {
+      errorOutput.write(`Discovery demo failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 1;
+    }
+  }
   const json = args.includes('--json');
   const positional = args.filter((argument) => argument !== '--json');
   if (

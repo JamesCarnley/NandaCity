@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
-import { createOwnedProcessStopper } from '../../src/demo/anvil.js';
+import { createOwnedProcessStopper, ownedAnvilChildEnv } from '../../src/demo/anvil.js';
+
+test('owned Anvil child receives PATH but not caller database or API secrets', () => {
+  assert.deepEqual(ownedAnvilChildEnv({ PATH: '/test/bin', DATABASE_URL: 'postgres://private',
+    OPENAI_API_KEY: 'private-key' }), { PATH: '/test/bin' });
+});
 
 class ControlledChildProcess extends EventEmitter {
   exitCode: number | null = null;

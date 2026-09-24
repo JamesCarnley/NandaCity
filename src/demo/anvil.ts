@@ -10,6 +10,11 @@ const EXPECTED_ANVIL_VERSION = '1.7.1';
 const START_TIMEOUT_MS = 10_000;
 const STOP_TIMEOUT_MS = 2_000;
 
+/** Owned local chain processes never receive the caller's RPC, DB, or API secrets. */
+export function ownedAnvilChildEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { PATH: source['PATH'] ?? '' };
+}
+
 export type OwnedAnvilResult<T> = {
   value: T;
   rpcUrl: string;
@@ -100,6 +105,7 @@ async function assertAnvilVersion(binary: string): Promise<void> {
     ({ stdout } = await execFileAsync(binary, ['--version'], {
       timeout: 5_000,
       encoding: 'utf8',
+      env: ownedAnvilChildEnv(),
     }));
   } catch (error) {
     throw new Error(
@@ -254,7 +260,7 @@ export async function withOwnedAnvil<T>(
       'shanghai',
       '--quiet',
     ],
-    { stdio: ['ignore', 'ignore', 'ignore'] },
+    { stdio: ['ignore', 'ignore', 'ignore'], env: ownedAnvilChildEnv() },
   );
   let spawnError: Error | undefined;
   child.on('error', (error) => {
