@@ -35,7 +35,8 @@ For a second verification, the demo writes its exported JSON to a temporary
 file and launches `src/demo/verifyJourneyCli.ts` in a separate Node process.
 That verifier takes the trusted chain ID and registry from the owned setup,
 not from an Index row; independently re-reads the exact observation block and
-current block; re-fetches the exact card from an allowlisted origin; and uses
+the signed request's potentially later authority-basis block, plus the current
+block; re-fetches the exact card from an allowlisted origin; and uses
 its own clock. A changed answer byte is rejected by the signed digest check.
 The temporary file and owned resources are removed at the end. The printed
 JSON is a portable evidence artifact, but **a later independent authority

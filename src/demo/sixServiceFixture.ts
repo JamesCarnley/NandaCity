@@ -190,12 +190,17 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
       }
       ownerIsolationRejected = true;
     }
-    if (!ownerIsolationRejected || (await readIdentitySnapshot(chain, victim.agent)).agentURI !== originalURI) {
+    const settledSnapshot = await readIdentitySnapshot(chain, victim.agent);
+    if (!ownerIsolationRejected || settledSnapshot.agentURI !== originalURI) {
       throw new Error('simulated operator A could alter operator B registration');
     }
     // All registrations and the denied cross-owner attempt are settled. Freeze one
-    // common chain basis for the six services; later chain movement stays unknown.
-    const finalBlock = await chain.getBlockNumber();
+    // common uncached chain basis for the six services; later movement stays unknown.
+    // getBlockNumber() may be cached before the final setAgentURI is mined.
+    const finalBlock = BigInt(settledSnapshot.blockNumber);
+    if (services.some((service) => finalBlock < BigInt(service.profile.source.blockNumber))) {
+      throw new Error('settled chain basis precedes a published service profile');
+    }
     for (let index = 0; index < services.length; index++) {
       const service = services[index]!;
       const snapshot = await readIdentitySnapshot(serviceChain, service.agent, finalBlock);

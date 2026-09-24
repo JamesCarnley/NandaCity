@@ -4,10 +4,15 @@ import { stat } from 'node:fs/promises';
 import test from 'node:test';
 
 import { CITY_REQUEST_DATA_TYPE } from '../../src/a2a/service.js';
+import { a2aTaskSchema, type A2ATask } from '../../src/a2a/wire.js';
 import { withSixServiceFixture, type FixtureService, type SixServiceFixture } from '../../src/demo/sixServiceFixture.js';
-import type { CityRequest } from '../../src/interaction/schema.js';
+import { verifyJourneyEvidence, type JourneyEvidence } from '../../src/demo/journeyReport.js';
+import { readIdentitySnapshot } from '../../src/identity/registry.js';
+import { envelopeSchema, type CityRequest, type SignedEnvelope } from '../../src/interaction/schema.js';
 
-async function sendOwnedProbe(service: FixtureService, fixture: SixServiceFixture): Promise<void> {
+async function sendOwnedProbe(service: FixtureService, fixture: SixServiceFixture): Promise<{
+  request: SignedEnvelope; task: A2ATask;
+}> {
   const createdAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const deadline = new Date(Date.parse(createdAt) + 600_000).toISOString().replace('.000Z', 'Z');
   const profile = service.profile;
@@ -53,6 +58,26 @@ async function sendOwnedProbe(service: FixtureService, fixture: SixServiceFixtur
   assert.equal(body.id, id);
   assert.equal(body.error, undefined, JSON.stringify(body.error));
   assert.equal(body.result?.status?.state, 'submitted');
+  return { request: envelope, task: a2aTaskSchema.parse(body.result) };
+}
+
+async function terminalTask(service: FixtureService, taskId: string): Promise<A2ATask> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const id = randomUUID();
+    const response = await fetch(service.serviceUrl, { method: 'POST',
+      headers: { 'content-type': 'application/json' }, redirect: 'manual',
+      body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tasks/get', params: { id: taskId } }),
+      signal: AbortSignal.timeout(5_000) });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { id: string; result?: unknown; error?: unknown };
+    assert.equal(body.id, id);
+    assert.equal(body.error, undefined, JSON.stringify(body.error));
+    const task = a2aTaskSchema.parse(body.result);
+    if (task.status.state === 'completed' || task.status.state === 'failed') return task;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('owned service did not finish its A2A Task');
 }
 
 test('six owned services converge as three verified city alternatives through both real Indexes',
@@ -116,4 +141,84 @@ test('six owned services converge as three verified city alternatives through bo
       await assert.rejects(fetch(url, { signal: AbortSignal.timeout(500) }));
     }
     for (const directory of storeDirectories) await assert.rejects(stat(directory), { code: 'ENOENT' });
+  });
+
+test('journey verifier separates Index publication N from the later signed request basis M',
+  { timeout: 180_000 }, async () => {
+    const checkout = process.env['NANDA_INDEX_CHECKOUT'];
+    assert.ok(checkout, 'NANDA_INDEX_CHECKOUT must identify the pinned public Index checkout');
+    await withSixServiceFixture(checkout, async (fixture) => {
+      const service = fixture.services[0]!;
+      const publishedCandidate = fixture.searches.Chicago.A.result.candidates.find((item) =>
+        item.agent.agentId === service.agent.agentId);
+      assert.ok(publishedCandidate);
+      const { request, task: submitted } = await sendOwnedProbe(service, fixture);
+      const task = await terminalTask(service, submitted.id);
+      assert.equal(task.status.state, 'completed');
+      const metadata = task.metadata?.['org.nandacity'] as Record<string, unknown>;
+      const data = task.artifacts?.[0]?.parts[0]?.data;
+      assert.equal(typeof data?.['answerBase64'], 'string');
+      const basisObservation = await readIdentitySnapshot(fixture.chain, service.agent,
+        BigInt(service.profile.source.blockNumber));
+      const currentObservation = await readIdentitySnapshot(fixture.chain, service.agent);
+      const earlierObservation = await readIdentitySnapshot(fixture.chain, service.agent,
+        BigInt(basisObservation.blockNumber) - 1n);
+      assert.equal(earlierObservation.agentURI, basisObservation.agentURI);
+      assert.equal(earlierObservation.agentOwner.toLowerCase(), basisObservation.agentOwner.toLowerCase());
+      // Model an Index row issued at the earlier canonical block while retaining
+      // the exact declaration and card supplied by the running Index.
+      const candidate = { ...publishedCandidate, observationBlock: {
+        number: earlierObservation.blockNumber, hash: earlierObservation.blockHash,
+        timestamp: earlierObservation.blockTimestamp } };
+      assert.ok(BigInt(candidate.observationBlock.number) < BigInt(basisObservation.blockNumber),
+        'the publication observation must precede the signed request basis');
+      assert.equal(currentObservation.blockNumber, basisObservation.blockNumber);
+      const evidence: JourneyEvidence = { candidate,
+        cardBase64: Buffer.from(service.cardBytes).toString('base64'), request,
+        acceptance: envelopeSchema.parse(metadata['acceptance']),
+        completion: envelopeSchema.parse(metadata['completion']),
+        answerBase64: data!['answerBase64'] as string, task,
+        basisObservation, currentObservation,
+        observedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z') };
+      const valid = await verifyJourneyEvidence(evidence, fixture.chain, fixture.domain,
+        fixture.searches.Chicago.A.filter, fixture.cardOrigin);
+      assert.equal(valid.discovery.status, 'verified');
+      assert.equal(valid.request?.profileBasis, 'matched');
+      assert.equal(valid.evidenceUsable, true, JSON.stringify(valid.reasons));
+
+      const wrongBasis = await verifyJourneyEvidence({ ...evidence,
+        basisObservation: await readIdentitySnapshot(fixture.chain, service.agent,
+          BigInt(candidate.observationBlock.number)) }, fixture.chain, fixture.domain,
+      fixture.searches.Chicago.A.filter, fixture.cardOrigin);
+      assert.equal(wrongBasis.firstBrokenBoundary, 'authority-basis');
+      assert.equal(wrongBasis.evidenceUsable, false);
+
+      const requestValue = JSON.parse(Buffer.from(request.payloadBase64, 'base64').toString('utf8')) as CityRequest;
+      const wrongAgents = [fixture.services[1]!.agent,
+        { ...service.agent, registry: '0x7777777777777777777777777777777777777777' as const },
+        { ...service.agent, chainId: service.agent.chainId + 1 }];
+      for (const wrongAgent of wrongAgents) {
+        const wrongService = await verifyJourneyEvidence({ ...evidence,
+          request: await fixture.signAsCaller({ ...requestValue,
+            service: { method: 'erc8004', agent: wrongAgent },
+            caller: { ...requestValue.caller, chainId: wrongAgent.chainId } }),
+        }, fixture.chain, fixture.domain, fixture.searches.Chicago.A.filter,
+        fixture.cardOrigin);
+        assert.equal(wrongService.evidenceUsable, false);
+        assert.equal(wrongService.firstBrokenBoundary, 'evidence');
+      }
+
+      const wrongKind = await verifyJourneyEvidence({ ...evidence,
+        request: evidence.acceptance }, fixture.chain, fixture.domain,
+      fixture.searches.Chicago.A.filter, fixture.cardOrigin);
+      assert.equal(wrongKind.evidenceUsable, false);
+      assert.equal(wrongKind.firstBrokenBoundary, 'evidence');
+
+      const tamperedPublication = await verifyJourneyEvidence({ ...evidence,
+        candidate: { ...candidate, observationBlock: { ...candidate.observationBlock,
+          hash: `0x${'ab'.repeat(32)}` } } }, fixture.chain, fixture.domain,
+      fixture.searches.Chicago.A.filter, fixture.cardOrigin);
+      assert.equal(tamperedPublication.discovery.status, 'rejected');
+      assert.equal(tamperedPublication.firstBrokenBoundary, 'discovery');
+    });
   });

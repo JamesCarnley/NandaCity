@@ -6,6 +6,7 @@ import { verifyDiscoveryWithCard, type DiscoveredCandidate, type DiscoveryVerifi
 import { readIdentitySnapshot } from '../identity/registry.js';
 import { verifyProfile, type AuthoritySnapshot } from '../identity/verify.js';
 import { verifyInteraction, type InteractionFinding, type ContinuityFinding } from '../interaction/verify.js';
+import { decodeEnvelope } from '../interaction/signatures.js';
 import type { SignedEnvelope } from '../interaction/schema.js';
 import { fetchOwnedCard } from './twoIndexes.js';
 
@@ -17,6 +18,7 @@ export type JourneyEvidence = {
   completion?: SignedEnvelope;
   answerBase64?: string;
   task: A2ATask;
+  /** Chain snapshot at signed request.profileBasis.blockNumber (M), not Index publication observation N. */
   basisObservation: AuthoritySnapshot;
   currentObservation: AuthoritySnapshot;
   observedAt: string;
@@ -91,9 +93,22 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
   const origin = evidence?.candidate?.observerOrigin ?? 'unknown';
   let task: A2ATask;
   let cardBytes: Uint8Array;
+  let requestBasisBlock: bigint;
   try {
     task = a2aTaskSchema.parse(evidence.task);
     cardBytes = exactBase64(evidence.cardBase64, 64 * 1024);
+    const request = decodeEnvelope(evidence.request).statement.value;
+    if (request.kind !== 'request') throw new Error('signed request has wrong statement kind');
+    const requestAgent = request.service.agent;
+    const candidateAgent = evidence.candidate.agent;
+    if (requestAgent.chainId !== candidateAgent.chainId ||
+        requestAgent.registry.toLowerCase() !== candidateAgent.registry.toLowerCase() ||
+        requestAgent.agentId !== candidateAgent.agentId ||
+        requestAgent.chainId !== domain.chainId ||
+        requestAgent.registry.toLowerCase() !== domain.registry.toLowerCase()) {
+      throw new Error('signed request service differs from the Index candidate or selected domain');
+    }
+    requestBasisBlock = BigInt(request.profileBasis.blockNumber);
   } catch (error) {
     return stopped(unavailable(origin, 'evidence format was not accepted'), 'evidence',
       error instanceof Error ? error.message : 'malformed exported evidence');
@@ -121,10 +136,9 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
   }
   let basis: AuthoritySnapshot;
   try {
-    basis = await readIdentitySnapshot(client, evidence.candidate.agent,
-      BigInt(evidence.candidate.observationBlock.number));
+    basis = await readIdentitySnapshot(client, evidence.candidate.agent, requestBasisBlock);
   } catch (error) {
-    return stopped(discovery, 'authority-basis', `exact observation block read failed: ${
+    return stopped(discovery, 'authority-basis', `exact request basis block read failed: ${
       error instanceof Error ? error.message : String(error)}`);
   }
   if (!sameSnapshot(basis, evidence.basisObservation)) {
