@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { createPublicClient, http } from 'viem';
 
@@ -13,6 +15,7 @@ import { verifyJourneyEvidence, type JourneyEvidence } from '../../src/demo/jour
 import { readIdentitySnapshot } from '../../src/identity/registry.js';
 import { decodeEnvelope } from '../../src/interaction/signatures.js';
 import { envelopeSchema, type CityRequest, type SignedEnvelope } from '../../src/interaction/schema.js';
+import { writeStaticReport } from '../../src/report/writeReport.js';
 
 async function sendOwnedProbe(service: FixtureService, fixture: SixServiceFixture,
   cityOverride?: FixtureService['city']): Promise<{
@@ -324,6 +327,26 @@ test('six alternatives complete through actual Indexes, with an exact retry and 
     assert.match(plain, /Scope:.*share local code.*no reputation/i);
     assert.match(plain, /Ephemeral:.*stopped.*not a durable authority proof/i);
     assert.doesNotMatch(plain, /Limits:/);
+
+    const directory = await mkdtemp(join(tmpdir(), 'city-report-integration-'));
+    try {
+      const htmlPath = join(directory, 'comparison.html');
+      const evidencePath = join(directory, 'original-evidence.json');
+      await writeStaticReport(async () => result, { htmlPath, evidencePath });
+      const html = await readFile(htmlPath, 'utf8');
+      const evidence = await readFile(evidencePath, 'utf8');
+      assert.equal(evidence, `${JSON.stringify(result, null, 2)}\n`);
+      assert.equal((html.match(/<article class="choice"/g) ?? []).length, 6);
+      assert.match(html, /Chicago.*Boston/s);
+      assert.match(html, /href="\.\/original-evidence\.json"/);
+      assert.match(html, /Accepted, then failed/);
+      assert.match(html, /8 message\/send attempts/);
+      assert.doesNotMatch(html, /<script|fetch\(/i);
+      assert.equal(JSON.parse(evidence).alternatives[0].success.evidence.answerBase64,
+        result.alternatives[0]!.success.evidence.answerBase64);
+      await assert.rejects(writeStaticReport(async () => result, { htmlPath, evidencePath }),
+        /exists|EEXIST/i);
+    } finally { await rm(directory, { recursive: true, force: true }); }
 
     // Manifest metadata is not an authority source: changing only its outer
     // AgentRef must fail before any later (now stopped) fixture RPC read.

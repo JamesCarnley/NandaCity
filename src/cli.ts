@@ -6,11 +6,13 @@ import { runTwoIndexDemo } from './demo/twoIndexes.js';
 import { runChicagoJourney } from './demo/chicagoJourney.js';
 import { formatJourneyPlain } from './demo/journeyReport.js';
 import { formatComparePlain, runSixServiceJourney } from './demo/sixServiceJourney.js';
+import { writeStaticReport } from './report/writeReport.js';
 
 const usage = 'Usage: npm run demo:identity -- [--json]';
 const discoveryUsage = 'Usage: npm run demo:discovery -- --index-checkout /absolute/path [--json]';
 const journeyUsage = 'Usage: npm run demo:journey -- --index-checkout /absolute/path [--json]';
 const compareUsage = 'Usage: npm run demo:compare -- --index-checkout /absolute/path [--json]';
+const reportUsage = 'Usage: npm run demo:report -- --index-checkout /absolute/path --html /absolute/report.html --evidence /absolute/evidence.json';
 
 export function formatIdentityDemoJson(result: IdentityDemoResult): string {
   return JSON.stringify(result, null, 2);
@@ -48,6 +50,32 @@ export async function runCli(
   output: Pick<NodeJS.WriteStream, 'write'> = process.stdout,
   errorOutput: Pick<NodeJS.WriteStream, 'write'> = process.stderr,
 ): Promise<number> {
+  if (args[0] === 'report' && args[1] === 'demo') {
+    const fields = ['--index-checkout', '--html', '--evidence'] as const;
+    const values = fields.map((field) => {
+      const index = args.indexOf(field);
+      return index >= 2 ? args[index + 1] : undefined;
+    });
+    const [checkout, htmlPath, evidencePath] = values;
+    if (args.length !== 8 || fields.some((field) => args.filter((part) => part === field).length !== 1) ||
+        values.some((value) => !value || !isAbsolute(value)) ||
+        args.slice(2).some((part, index) => index % 2 === 0 && !fields.includes(part as typeof fields[number]))) {
+      errorOutput.write(`${reportUsage}\n`);
+      if (values.some((value) => value && !isAbsolute(value))) {
+        errorOutput.write('Index checkout and output paths must be absolute.\n');
+      }
+      return 2;
+    }
+    try {
+      await writeStaticReport(() => runSixServiceJourney(checkout!),
+        { htmlPath: htmlPath!, evidencePath: evidencePath! });
+      output.write(`Static City report written: ${htmlPath}\nOriginal evidence JSON: ${evidencePath}\n`);
+      return 0;
+    } catch (error) {
+      errorOutput.write(`Static City report failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 1;
+    }
+  }
   if (args[0] === 'compare' && args[1] === 'demo') {
     const indexFlag = args.indexOf('--index-checkout');
     const checkout = indexFlag >= 0 ? args[indexFlag + 1] : undefined;

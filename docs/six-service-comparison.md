@@ -44,3 +44,30 @@ cards, endpoints, and temporary verifier files before returning. The JSON's
 loopback origins are therefore historical, not live. Rechecking exported
 observations later requires an independently available copy of the same chain;
 the stopped ephemeral Anvil cannot be reconstructed from the JSON alone.
+
+## Static comparison report
+
+Run one fresh fixture and write both outputs to explicit absolute sibling paths:
+
+```sh
+npm run demo:report -- --index-checkout /absolute/path/to/nanda-index-v2 \
+  --html /absolute/output/comparison.html \
+  --evidence /absolute/output/original-evidence.json
+```
+
+The command reserves both paths exclusively before starting the fixture and
+refuses to replace an existing file. On SIGINT or SIGTERM it completes owned
+resource cleanup and removes its reserved output files. It writes the complete
+original journey result as JSON, preserving its Base64-encoded exact signed
+payload and answer bytes, and a self-contained HTML presentation linking to
+that sibling JSON.
+The HTML has no JavaScript, remote assets, browser fetches, or running server
+dependency; open it directly after the owned resources stop. Its three equal
+choices per city include each full authored dinner/activity plan, route, example
+budget, sources, unmet constraints, and recorded observation basis. It shows the
+separate accepted failure, exact retry and call count outside the six choices.
+
+The saved verification status records checks performed **during** the local
+run. The page does not re-verify authority offline, rate semantic quality, rank
+operators, or turn synthetic plans into live venue or price claims. Treat the
+exported chain observations as recorded evidence, not a durable state proof.

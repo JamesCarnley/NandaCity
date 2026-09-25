@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtemp, copyFile, chmod, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, copyFile, chmod, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +26,7 @@ const alive = (pid: number): boolean => {
 };
 export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM',
   stage: 'container-acquiring' | 'ready' | 'anvil-preflight' | 'index' | 'lost-receipt' | 'demo-ready',
-  repeated = false, processGroup = false): Promise<void> {
+  repeated = false, processGroup = false, reportCommand = false): Promise<void> {
   const docker = execFileSync('which', ['docker'], { encoding: 'utf8' }).trim();
   const anvil = execFileSync('which', ['anvil'], { encoding: 'utf8' }).trim();
   const endpoint = execFileSync(docker, ['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'],
@@ -48,7 +48,12 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
       `exec ${quote(binary!)} "$@"\n`, { mode: 0o755 });
   }
   const sentinel = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-  const child = spawn(process.execPath, ['--import', 'tsx', join(here, 'fixtures/signalWorker.ts'), log, checkout, stage],
+  const reportHtml = join(directory, 'comparison.html');
+  const reportEvidence = join(directory, 'original-evidence.json');
+  const childArgs = reportCommand ? ['--import', 'tsx', join(here, '../../src/cli.ts'),
+    'report', 'demo', '--index-checkout', checkout, '--html', reportHtml, '--evidence', reportEvidence] :
+    ['--import', 'tsx', join(here, 'fixtures/signalWorker.ts'), log, checkout, stage];
+  const child = spawn(process.execPath, childArgs,
     { env: { ...process.env, PATH: `${directory}:${process.env['PATH'] ?? ''}` },
       detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
@@ -73,6 +78,10 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
       assert.ok(Date.now() < readyDeadline, `worker not ready: ${output}`);
       await delay(25);
     }
+    if (reportCommand) {
+      assert.equal((await stat(reportHtml)).isFile(), true, 'report HTML was not reserved before signal');
+      assert.equal((await stat(reportEvidence)).isFile(), true, 'report evidence was not reserved before signal');
+    }
     if (stage !== 'lost-receipt') {
       if (processGroup) process.kill(-child.pid!, signal); else child.kill(signal);
     }
@@ -82,7 +91,7 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
     if (stage === 'lost-receipt') assert.equal(child.exitCode, 1, output);
     else assert.equal(child.signalCode, signal, `root must terminate with original signal: ${output}`);
     const recorded = await events(log);
-    if (stage !== 'anvil-preflight' && stage !== 'demo-ready') {
+    if (!reportCommand && stage !== 'anvil-preflight' && stage !== 'demo-ready') {
       assert.ok(recorded.some((event) => event.stage === 'scenario-cleaned'), 'scenario finally was bypassed');
     } else if (stage === 'anvil-preflight') {
       assert.equal(recorded.some((event) => event.stage === 'anvil'), false, 'Anvil spawned after cancellation');
@@ -105,6 +114,10 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
     assert.ok(alive(sentinel.pid!), 'unrelated child was killed');
     const after = containers();
     assert.ok(unrelated.every((id) => after.includes(id)), 'unrelated container was removed');
+    if (reportCommand) {
+      await assert.rejects(stat(reportHtml), { code: 'ENOENT' });
+      await assert.rejects(stat(reportEvidence), { code: 'ENOENT' });
+    }
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     sentinel.kill('SIGTERM');

@@ -6,9 +6,11 @@ request/acceptance/completion format, and an owned loopback A2A task service.
 It now includes one fixture-labeled Chicago journey and a six-service comparison
 for Chicago and Boston through actual pinned NANDA Indexes and exact AgentCards,
 with signed A2A evidence checked in a separate Node process while the local
-chain and card server remain live. See [the comparison guide](docs/six-service-comparison.md).
+chain and card server remain live. A self-contained static comparison report
+can be exported with its unabridged evidence JSON. See
+[the comparison guide](docs/six-service-comparison.md).
 It does **not** provide public-chain deployment, real operator onboarding,
-reputation, a user interface, or a deployed service.
+reputation, a live user interface, or a deployed service.
 
 The companion [NANDA Index fork](https://github.com/JamesCarnley/nanda-index-v2)
 provides exact per-service filtering and optional, read-only ERC-8004 following.
@@ -63,6 +65,7 @@ npm run check
 npm run demo:discovery -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 npm run demo:journey -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 npm run demo:compare -- --index-checkout "$NANDA_INDEX_CHECKOUT"
+npm run demo:report -- --index-checkout "$NANDA_INDEX_CHECKOUT" --html /absolute/output/comparison.html --evidence /absolute/output/evidence.json
 ```
 
 `NANDA_INDEX_CHECKOUT` is required for `npm run test:integration` and

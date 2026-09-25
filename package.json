@@ -8,13 +8,14 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --import tsx --test test/identity/anvil.test.ts test/identity/profile.test.ts test/identity/registry.test.ts test/identity/verify.test.ts test/discovery/cardFetch.test.ts test/discovery/cli.test.ts test/discovery/indexClient.test.ts test/discovery/indexProcesses.test.ts test/discovery/ownedProxy.test.ts test/discovery/verifyDiscovery.test.ts test/interaction/schema.test.ts test/interaction/signatures.test.ts test/interaction/verify.test.ts test/a2a/answer.test.ts test/a2a/runtime.test.ts",
-    "test:integration": "node --import tsx --test --test-concurrency=1 test/identity/registry.integration.test.ts test/discovery/twoIndexes.integration.test.ts test/discovery/chicagoJourney.integration.test.ts test/discovery/sixServiceFixture.integration.test.ts",
+    "test": "node --import tsx --test test/identity/anvil.test.ts test/identity/profile.test.ts test/identity/registry.test.ts test/identity/verify.test.ts test/discovery/cardFetch.test.ts test/discovery/cli.test.ts test/discovery/indexClient.test.ts test/discovery/indexProcesses.test.ts test/discovery/ownedProxy.test.ts test/discovery/verifyDiscovery.test.ts test/interaction/schema.test.ts test/interaction/signatures.test.ts test/interaction/verify.test.ts test/a2a/answer.test.ts test/a2a/runtime.test.ts test/report/staticReport.test.ts",
+    "test:integration": "node --import tsx --test --test-concurrency=1 test/identity/registry.integration.test.ts test/discovery/twoIndexes.integration.test.ts test/discovery/chicagoJourney.integration.test.ts test/discovery/sixServiceFixture.integration.test.ts test/report/reportSignal.integration.test.ts",
     "contracts:check": "node --import tsx scripts/check-reference-contracts.ts",
     "demo:identity": "node --import tsx src/cli.ts identity demo",
     "demo:discovery": "node --import tsx src/cli.ts discovery demo",
     "demo:journey": "node --import tsx src/cli.ts journey demo",
     "demo:compare": "node --import tsx src/cli.ts compare demo",
+    "demo:report": "node --import tsx src/cli.ts report demo",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run typecheck && npm test && npm run build && npm run test:integration"
