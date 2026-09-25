@@ -1,6 +1,6 @@
 # Pinned ERC-8004 reference sources
 
-These two Solidity files are unmodified copies from the public
+These three Solidity files are unmodified copies from the public
 [`erc-8004/erc-8004-contracts`](https://github.com/erc-8004/erc-8004-contracts)
 repository at commit `b9e466c250744a7e06b13dff9d3c2844ed64f825`:
 
@@ -8,6 +8,8 @@ repository at commit `b9e466c250744a7e06b13dff9d3c2844ed64f825`:
   `9d3b152b88733e61f40ae2de775f7448001b73d9165f23ee8bbe5dd88cd042aa`
 - `IdentityRegistryUpgradeable.sol` — SHA-256
   `18c8ca8c88493b46e54d000c96eaf7470d1f9dbfe55493fd7fa923bae543ff75`
+- `ReputationRegistryUpgradeable.sol` — SHA-256
+  `9063eba192391c3e6959edcad452184f07a6c1b3975391e7c4d77dbf1eaabf09`
 
 Each source retains its upstream MIT SPDX notice. The local compiler rejects a
 hash mismatch before compiling. It also compiles OpenZeppelin's
@@ -17,8 +19,12 @@ entry source has SHA-256
 
 The compiler is pinned to solc-js 0.8.24 with Shanghai EVM output, optimizer
 enabled at 200 runs, and `viaIR: true`. These sources and the proxy bootstrap are
-local demonstration machinery. They are not a replacement registry and are not
-a deployment recommendation.
+local demonstration machinery. The Reputation fixture deploys only to a
+loopback RPC on local chain ID 31337, links to an already deployed Identity
+Registry, checks its `2.0.0` version and ERC-721 interface, then checks the
+Reputation `2.0.0` version and identity link. This preflight rejects obvious
+wrong targets; it does not authenticate arbitrary contract provenance. It does
+not publish feedback. These fixtures are not a deployment recommendation.
 
 The npm override for solc's legacy `tmp` dependency is deliberately limited to
 patched `tmp@0.2.7`. It preserves solc 0.8.24 and the `fileSync` API that solc's
@@ -30,6 +36,8 @@ bytecode, and deployed bytecode tuple:
 
 - `IdentityRegistryUpgradeable`:
   `c0e4f95ece5aef9020e27463e849a96ebcf802f252d8d5fc72f7dbe3ec1739c2`
+- `ReputationRegistryUpgradeable`:
+  `2301f7165ecfc4978e9ae2cbce6d75a12d8dc20769eda11be68eb215c1dcdc83`
 - `HardhatMinimalUUPS`:
   `6d7c978d16accfd97118f9f715dbee54cd04ed23a1fde5131a62d434e2a0220f`
 - `ERC1967Proxy`:

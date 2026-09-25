@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 
-import { encodeFunctionData, parseAbi, type Account, type Address, type Hash,
+import { encodeFunctionData, isAddress, parseAbi, zeroAddress, type Account, type Address, type Hash,
   type PublicClient, type WalletClient, type Transport } from 'viem';
 
 import { encodeRegistration, digestBytes } from '../identity/profile.js';
+import { assertLocalWriteRpcUrl } from './anvil.js';
 import { compileReferenceContracts, type ContractArtifact } from './contracts.js';
 
 export const chicago = 'https://www.wikidata.org/entity/Q1297';
@@ -15,6 +16,12 @@ export const registryAbi = parseAbi([
   'function transferFrom(address from, address to, uint256 tokenId)',
 ]);
 const adminAbi = parseAbi(['function initialize()', 'function getVersion() view returns (string)']);
+const erc721InterfaceAbi = parseAbi(['function supportsInterface(bytes4 interfaceId) view returns (bool)']);
+const reputationAdminAbi = parseAbi([
+  'function initialize(address identityRegistry)',
+  'function getVersion() view returns (string)',
+  'function getIdentityRegistry() view returns (address)',
+]);
 const minimalAbi = parseAbi(['function upgradeToAndCall(address newImplementation, bytes data) payable']);
 
 export type CardRecord = { agentId: string; owner: Account; city: 'Chicago' | 'Boston';
@@ -45,6 +52,70 @@ export async function deployRegistry(client: PublicClient,
     functionName: 'upgradeToAndCall', args: [implementation,
       encodeFunctionData({ abi: adminAbi, functionName: 'initialize' })], chain: null }));
   assert.equal(await client.readContract({ address: proxy, abi: adminAbi, functionName: 'getVersion' }), '2.0.0');
+  return proxy;
+}
+
+/** This write path is only for the disposable local-chain fixture. */
+export async function deployReputationRegistry(client: PublicClient,
+  admin: WalletClient<Transport, undefined, Account>, identityRegistry: Address): Promise<Address> {
+  const publicUrl = client.transport.type === 'http' && 'url' in client.transport
+    ? client.transport.url : undefined;
+  const walletUrl = admin.transport.type === 'http' && 'url' in admin.transport
+    ? admin.transport.url : undefined;
+  if (typeof publicUrl !== 'string' || typeof walletUrl !== 'string') {
+    throw new Error('Reputation deployment requires a loopback HTTP RPC');
+  }
+  assertLocalWriteRpcUrl(publicUrl);
+  assertLocalWriteRpcUrl(walletUrl);
+  if (publicUrl !== walletUrl) {
+    throw new Error('Reputation deployment requires the same loopback RPC for reads and writes');
+  }
+  if (typeof identityRegistry !== 'string' || !isAddress(identityRegistry) ||
+    identityRegistry.toLowerCase() === zeroAddress) {
+    throw new Error('Reputation deployment requires a nonzero Identity Registry address');
+  }
+  if (await client.getChainId() !== 31_337) {
+    throw new Error('Reputation deployment requires local chain ID 31337');
+  }
+  const identityCode = await client.getCode({ address: identityRegistry });
+  if (!identityCode || identityCode === '0x') {
+    throw new Error('Reputation deployment requires a deployed Identity Registry');
+  }
+  let identityVersion: string;
+  try {
+    identityVersion = await client.readContract({ address: identityRegistry, abi: adminAbi,
+      functionName: 'getVersion' });
+  } catch (error) {
+    throw new Error('Reputation deployment requires a readable Identity Registry', { cause: error });
+  }
+  if (identityVersion !== '2.0.0') {
+    throw new Error(`Reputation deployment requires Identity Registry 2.0.0, received ${identityVersion}`);
+  }
+  let supportsErc721: boolean;
+  try {
+    supportsErc721 = await client.readContract({ address: identityRegistry,
+      abi: erc721InterfaceAbi, functionName: 'supportsInterface', args: ['0x80ac58cd'] });
+  } catch (error) {
+    throw new Error('Identity Registry ERC-721 interface check failed', { cause: error });
+  }
+  if (!supportsErc721) {
+    throw new Error('Identity Registry must support ERC-721');
+  }
+
+  const artifacts = compileReferenceContracts();
+  const minimal = await deploy(client, admin, artifacts.minimalUups, []);
+  const proxy = await deploy(client, admin, artifacts.erc1967Proxy, [minimal,
+    encodeFunctionData({ abi: reputationAdminAbi, functionName: 'initialize',
+      args: [identityRegistry] })]);
+  const implementation = await deploy(client, admin, artifacts.reputationRegistry, []);
+  await receipt(client, await admin.writeContract({ address: proxy, abi: minimalAbi,
+    functionName: 'upgradeToAndCall', args: [implementation,
+      encodeFunctionData({ abi: reputationAdminAbi, functionName: 'initialize',
+        args: [identityRegistry] })], chain: null }));
+  assert.equal(await client.readContract({ address: proxy, abi: reputationAdminAbi,
+    functionName: 'getVersion' }), '2.0.0');
+  assert.equal((await client.readContract({ address: proxy, abi: reputationAdminAbi,
+    functionName: 'getIdentityRegistry' })).toLowerCase(), identityRegistry.toLowerCase());
   return proxy;
 }
 

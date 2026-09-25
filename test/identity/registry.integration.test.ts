@@ -1,9 +1,68 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, createTestClient, createWalletClient, http, parseAbi,
+  parseEther, zeroAddress, type Address } from 'viem';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 import { withOwnedAnvil } from '../../src/demo/anvil.js';
+import { deployRegistry, deployReputationRegistry } from '../../src/demo/registryFixture.js';
+
+const reputationAbi = parseAbi([
+  'function getVersion() view returns (string)',
+  'function getIdentityRegistry() view returns (address)',
+]);
+
+test('deploys the pinned local Reputation proxy linked to the selected Identity Registry', async () => {
+  await withOwnedAnvil(async (rpcUrl) => {
+    const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000 });
+    const client = createPublicClient({ transport, pollingInterval: 50 });
+    const testClient = createTestClient({ mode: 'anvil', transport });
+    const account = privateKeyToAccount(generatePrivateKey());
+    await testClient.setBalance({ address: account.address, value: parseEther('100') });
+    const admin = createWalletClient({ account, transport });
+    const identity = await deployRegistry(client, admin);
+
+    const beforeInvalid = await client.getBlockNumber();
+    await assert.rejects(deployReputationRegistry(client, admin, zeroAddress),
+      /identity registry/i);
+    await assert.rejects(deployReputationRegistry(client, admin, account.address),
+      /identity registry/i);
+    await assert.rejects(deployReputationRegistry(client, admin, undefined as unknown as Address),
+      /identity registry/i);
+    assert.equal(await client.getBlockNumber(), beforeInvalid,
+      'invalid identity input must not trigger a deployment');
+
+    const reputation = await deployReputationRegistry(client, admin, identity);
+    assert.notEqual(reputation.toLowerCase(), identity.toLowerCase());
+    assert.ok(await client.getCode({ address: reputation }));
+    assert.equal(await client.readContract({ address: reputation, abi: reputationAbi,
+      functionName: 'getVersion' }), '2.0.0');
+    assert.equal((await client.readContract({ address: reputation, abi: reputationAbi,
+      functionName: 'getIdentityRegistry' })).toLowerCase(), identity.toLowerCase());
+
+    const beforeWrongRegistry = await client.getBlockNumber();
+    await assert.rejects(deployReputationRegistry(client, admin, reputation),
+      /Identity Registry.*ERC-721/i,
+      'a Reputation proxy is not an Identity Registry even when it reports version 2.0.0');
+    assert.equal(await client.getBlockNumber(), beforeWrongRegistry,
+      'wrong-registry preflight must not trigger a deployment');
+  });
+});
+
+test('refuses Reputation deployment through non-loopback or mismatched RPC transports', async () => {
+  const account = privateKeyToAccount(generatePrivateKey());
+  const local = http('http://127.0.0.1:8545', { retryCount: 0 });
+  const otherLocal = http('http://127.0.0.1:8546', { retryCount: 0 });
+  const publicRpc = http('https://mainnet.example', { retryCount: 0 });
+  const identity = '0x1111111111111111111111111111111111111111';
+  await assert.rejects(deployReputationRegistry(createPublicClient({ transport: publicRpc }),
+    createWalletClient({ account, transport: publicRpc }), identity), /loopback HTTP RPC/i);
+  await assert.rejects(deployReputationRegistry(createPublicClient({ transport: local }),
+    createWalletClient({ account, transport: publicRpc }), identity), /loopback HTTP RPC|same.*RPC/i);
+  await assert.rejects(deployReputationRegistry(createPublicClient({ transport: local }),
+    createWalletClient({ account, transport: otherLocal }), identity), /same loopback RPC/i);
+});
 
 test('fails helpfully instead of skipping when Anvil is unavailable', async () => {
   const { runIdentityDemo } = await import('../../src/demo/identity.js');

@@ -17,12 +17,15 @@ const solc = require('solc') as {
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const identitySourceUnit = 'vendor/erc-8004/IdentityRegistryUpgradeable.sol';
+const reputationSourceUnit = 'vendor/erc-8004/ReputationRegistryUpgradeable.sol';
 const minimalSourceUnit = 'vendor/erc-8004/HardhatMinimalUUPS.sol';
 const proxySourceUnit = '@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol';
 
 const expectedSourceHashes = {
   [identitySourceUnit]:
     '18c8ca8c88493b46e54d000c96eaf7470d1f9dbfe55493fd7fa923bae543ff75',
+  [reputationSourceUnit]:
+    '9063eba192391c3e6959edcad452184f07a6c1b3975391e7c4d77dbf1eaabf09',
   [minimalSourceUnit]:
     '9d3b152b88733e61f40ae2de775f7448001b73d9165f23ee8bbe5dd88cd042aa',
   [proxySourceUnit]:
@@ -32,6 +35,8 @@ const expectedSourceHashes = {
 const expectedArtifactHashes = {
   IdentityRegistryUpgradeable:
     'c0e4f95ece5aef9020e27463e849a96ebcf802f252d8d5fc72f7dbe3ec1739c2',
+  ReputationRegistryUpgradeable:
+    '2301f7165ecfc4978e9ae2cbce6d75a12d8dc20769eda11be68eb215c1dcdc83',
   HardhatMinimalUUPS:
     '6d7c978d16accfd97118f9f715dbee54cd04ed23a1fde5131a62d434e2a0220f',
   ERC1967Proxy:
@@ -77,6 +82,7 @@ export type ReferenceProvenance = {
 
 export type ReferenceArtifacts = {
   identityRegistry: ContractArtifact;
+  reputationRegistry: ContractArtifact;
   minimalUups: ContractArtifact;
   erc1967Proxy: ContractArtifact;
   provenance: ReferenceProvenance;
@@ -227,10 +233,16 @@ export function compileReferenceContracts(): ReferenceArtifacts {
     identitySourceUnit,
     'IdentityRegistryUpgradeable',
   );
+  const reputationRegistry = toArtifact(
+    output,
+    reputationSourceUnit,
+    'ReputationRegistryUpgradeable',
+  );
   const minimalUups = toArtifact(output, minimalSourceUnit, 'HardhatMinimalUUPS');
   const erc1967Proxy = toArtifact(output, proxySourceUnit, 'ERC1967Proxy');
   const artifactSha256 = {
     IdentityRegistryUpgradeable: artifactHash(identityRegistry),
+    ReputationRegistryUpgradeable: artifactHash(reputationRegistry),
     HardhatMinimalUUPS: artifactHash(minimalUups),
     ERC1967Proxy: artifactHash(erc1967Proxy),
   };
@@ -245,6 +257,7 @@ export function compileReferenceContracts(): ReferenceArtifacts {
 
   return {
     identityRegistry,
+    reputationRegistry,
     minimalUups,
     erc1967Proxy,
     provenance: {
