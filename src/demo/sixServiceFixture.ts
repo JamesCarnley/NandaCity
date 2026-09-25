@@ -147,7 +147,16 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
               snapshot.blockHash === state.profile.source.blockHash ? 'unchanged' : 'unknown';
             return { basisProfile: state.profile, currentProfile, continuity, observedAt: utcNow() };
           },
-          execute: async (request) => syntheticEveningPlan(request, emphases[operatorIndex]!),
+          execute: async (request) => {
+            if (request.input.city !== city) {
+              throw new Error('service city differs from the published city');
+            }
+            if (operatorIndex === 0 && city === 'Chicago' &&
+                request.input.preferences.includes('Trigger provider fault')) {
+              throw new Error('intentional local post-acceptance fixture fault');
+            }
+            return syntheticEveningPlan(request, emphases[operatorIndex]!);
+          },
         });
         liveServices.push(service);
         const mined = await receipt(chain, await wallets[operatorIndex]!.writeContract({

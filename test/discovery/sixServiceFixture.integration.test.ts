@@ -6,16 +6,20 @@ import test from 'node:test';
 import { CITY_REQUEST_DATA_TYPE } from '../../src/a2a/service.js';
 import { a2aTaskSchema, type A2ATask } from '../../src/a2a/wire.js';
 import { withSixServiceFixture, type FixtureService, type SixServiceFixture } from '../../src/demo/sixServiceFixture.js';
+import { runSixServiceJourney } from '../../src/demo/sixServiceJourney.js';
 import { verifyJourneyEvidence, type JourneyEvidence } from '../../src/demo/journeyReport.js';
 import { readIdentitySnapshot } from '../../src/identity/registry.js';
+import { decodeEnvelope } from '../../src/interaction/signatures.js';
 import { envelopeSchema, type CityRequest, type SignedEnvelope } from '../../src/interaction/schema.js';
 
-async function sendOwnedProbe(service: FixtureService, fixture: SixServiceFixture): Promise<{
+async function sendOwnedProbe(service: FixtureService, fixture: SixServiceFixture,
+  cityOverride?: FixtureService['city']): Promise<{
   request: SignedEnvelope; task: A2ATask;
 }> {
   const createdAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const deadline = new Date(Date.parse(createdAt) + 600_000).toISOString().replace('.000Z', 'Z');
   const profile = service.profile;
+  const requestedCity = cityOverride ?? service.city;
   const request: CityRequest = {
     kind: 'request', version: '0.1',
     service: { method: 'erc8004', agent: service.agent },
@@ -32,13 +36,13 @@ async function sendOwnedProbe(service: FixtureService, fixture: SixServiceFixtur
       receiptSigner: service.runtimeAddress.toLowerCase() as `0x${string}`,
     },
     createdAt, deadline,
-    input: { version: '0.1', capability: 'evening-plan', city: service.city,
-      timeWindow: service.city === 'Chicago'
+    input: { version: '0.1', capability: 'evening-plan', city: requestedCity,
+      timeWindow: requestedCity === 'Chicago'
         ? { start: '2026-10-02T18:00:00-05:00', end: '2026-10-02T22:00:00-05:00',
           timeZone: 'America/Chicago' }
         : { start: '2026-10-02T18:00:00-04:00', end: '2026-10-02T22:00:00-04:00',
           timeZone: 'America/New_York' },
-      area: service.city === 'Chicago' ? 'The Loop' : 'Back Bay',
+      area: requestedCity === 'Chicago' ? 'The Loop' : 'Back Bay',
       budget: { currency: 'USD', minorUnits: '8500' },
       transport: ['walk', 'public-transit'], preferences: ['Fixture request'],
     },
@@ -131,6 +135,15 @@ test('six owned services converge as three verified city alternatives through bo
       }
       assert.equal(fixture.ownerIsolationRejected, true);
       for (const service of services) await sendOwnedProbe(service, fixture);
+      const wrongCity = await sendOwnedProbe(services[0]!, fixture, 'Boston');
+      const wrongCityTerminal = await terminalTask(services[0]!, wrongCity.task.id);
+      assert.equal(wrongCityTerminal.status.state, 'failed',
+        'a Chicago-only service must not answer a Boston request');
+      const wrongCityMetadata = wrongCityTerminal.metadata?.['org.nandacity'] as Record<string, unknown>;
+      const wrongCityCompletion = decodeEnvelope(envelopeSchema.parse(wrongCityMetadata['completion'])).statement.value;
+      assert.equal(wrongCityCompletion.kind, 'completion');
+      assert.equal(wrongCityCompletion.kind === 'completion' && wrongCityCompletion.outcome, 'failed');
+      assert.equal(wrongCityTerminal.artifacts, undefined);
       return { mode: 'local-fixture' as const, identitiesVerified: services.length,
         ownerIsolationRejected: fixture.ownerIsolationRejected };
     });
@@ -221,4 +234,72 @@ test('journey verifier separates Index publication N from the later signed reque
       assert.equal(tamperedPublication.discovery.status, 'rejected');
       assert.equal(tamperedPublication.firstBrokenBoundary, 'discovery');
     });
+  });
+
+test('six alternatives complete through actual Indexes, with an exact retry and separately signed accepted fault',
+  { timeout: 180_000 }, async () => {
+    const checkout = process.env['NANDA_INDEX_CHECKOUT'];
+    assert.ok(checkout, 'NANDA_INDEX_CHECKOUT must identify the pinned public Index checkout');
+    const result = await runSixServiceJourney(checkout);
+    assert.equal(result.mode, 'local-fixture');
+    assert.equal(result.alternatives.length, 6);
+    assert.equal(result.alternatives.filter((item) => item.city === 'Chicago').length, 3);
+    assert.equal(result.alternatives.filter((item) => item.city === 'Boston').length, 3);
+    assert.equal(new Set(result.alternatives.map((item) => item.ownerAddress)).size, 3);
+    assert.equal(new Set(result.alternatives.map((item) => item.agent.agentId)).size, 6);
+    assert.equal(new Set(result.alternatives.map((item) => item.runtimeAddress)).size, 6);
+    assert.equal(new Set(result.alternatives.map((item) => item.success.evidence.task.id)).size, 6);
+    assert.equal(new Set(result.alternatives.map((item) => item.success.evidence.answerBase64)).size, 6);
+    assert.equal(new Set(result.alternatives.map((item) => item.success.evidence.completion?.signature)).size, 6);
+    assert.notEqual(result.indexOrigins.A, result.indexOrigins.B);
+    for (const item of result.alternatives) {
+      const { evidence, report } = item.success;
+      assert.equal(report.discovery.status, 'verified');
+      assert.equal(report.request?.cryptography, 'valid');
+      assert.equal(report.acceptance?.cryptography, 'valid');
+      assert.equal(report.completion?.cryptography, 'valid');
+      assert.equal(report.completion?.answerBinding, 'matched');
+      assert.equal(report.execution, 'completed');
+      assert.equal(report.evidenceUsable, true, JSON.stringify(report.reasons));
+      assert.equal(report.contentValidation, 'not-tested');
+      const request = JSON.parse(Buffer.from(evidence.request.payloadBase64, 'base64').toString('utf8')) as CityRequest;
+      assert.equal(request.service.agent.agentId, item.agent.agentId);
+      assert.equal(request.profileBasis.blockNumber, evidence.basisObservation.blockNumber,
+        'signed request block M must be the authority basis, not Index publication N');
+      assert.equal(request.profileBasis.blockHash, evidence.basisObservation.blockHash);
+      const answer = JSON.parse(Buffer.from(evidence.answerBase64!, 'base64').toString('utf8')) as {
+        city: string; emphasis: string; schedule: unknown[]; route: unknown;
+        budget: unknown; sources: Array<{ kind: string; live: boolean }>;
+        liveDataChecked: boolean;
+      };
+      assert.equal(answer.city, item.city);
+      assert.equal(answer.emphasis, item.emphasis);
+      assert.equal(answer.schedule.length, 2);
+      assert.ok(answer.route);
+      assert.ok(answer.budget);
+      assert.ok(answer.sources.every((source) => source.kind === 'authored-fixture' && !source.live));
+      assert.equal(answer.liveDataChecked, false);
+    }
+    assert.equal(result.retry.sameTask, true);
+    assert.equal(result.retry.taskId, result.alternatives[0]!.success.evidence.task.id);
+    assert.equal(result.calls.messageSend, 8, 'six plans, one exact retry, and one separate failure');
+    assert.equal(result.calls.exactRetries, 1);
+    assert.ok(result.calls.tasksGet >= 7);
+    assert.equal(result.fault.agent.agentId, result.alternatives[0]!.agent.agentId);
+    assert.equal(result.fault.report.discovery.status, 'verified');
+    assert.equal(result.fault.report.acceptance?.cryptography, 'valid');
+    assert.equal(result.fault.report.completion?.cryptography, 'valid');
+    assert.equal(result.fault.report.completion?.terminalOutcome, 'failed');
+    assert.equal(result.fault.report.execution, 'failed');
+    assert.equal(result.fault.report.evidenceUsable, true, JSON.stringify(result.fault.report.reasons));
+    assert.equal(result.fault.report.completion?.signerBinding, 'matched');
+    assert.equal(result.fault.evidence.answerBase64, undefined);
+    assert.notEqual(result.fault.evidence.task.id, result.alternatives[0]!.success.evidence.task.id);
+    assert.notEqual(result.fault.evidence.completion?.signature,
+      result.alternatives[0]!.success.evidence.completion?.signature);
+    assert.deepEqual(result.executionOrder.map((item) => item.outcome),
+      ['completed', 'failed', 'completed', 'completed', 'completed', 'completed', 'completed']);
+    assert.equal(result.executionOrder[1]!.agentId, result.fault.agent.agentId);
+    assert.ok(result.limitations.some((value) => value.includes('shared')));
+    assert.ok(result.limitations.some((value) => value.includes('synthetic')));
   });
