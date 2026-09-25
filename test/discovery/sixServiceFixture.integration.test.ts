@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import test from 'node:test';
+import { createPublicClient, http } from 'viem';
 
 import { CITY_REQUEST_DATA_TYPE } from '../../src/a2a/service.js';
 import { a2aTaskSchema, type A2ATask } from '../../src/a2a/wire.js';
 import { withSixServiceFixture, type FixtureService, type SixServiceFixture } from '../../src/demo/sixServiceFixture.js';
 import { runSixServiceJourney } from '../../src/demo/sixServiceJourney.js';
+import { verifySixServiceBatch } from '../../src/demo/verifySixServiceCli.js';
 import { verifyJourneyEvidence, type JourneyEvidence } from '../../src/demo/journeyReport.js';
 import { readIdentitySnapshot } from '../../src/identity/registry.js';
 import { decodeEnvelope } from '../../src/interaction/signatures.js';
@@ -302,4 +304,41 @@ test('six alternatives complete through actual Indexes, with an exact retry and 
     assert.equal(result.executionOrder[1]!.agentId, result.fault.agent.agentId);
     assert.ok(result.limitations.some((value) => value.includes('shared')));
     assert.ok(result.limitations.some((value) => value.includes('synthetic')));
+    assert.equal(result.independentProcessVerified, true);
+    assert.equal(result.tamperRejected, true);
+    assert.deepEqual(result.cleanup, { ownedResourcesStopped: true });
+    const formatter = (await import('../../src/demo/sixServiceJourney.js') as unknown as {
+      formatComparePlain?: (value: typeof result) => string;
+    }).formatComparePlain;
+    const plain = formatter?.(result) ?? '';
+    assert.match(plain, /Chicago \(3 verified alternatives\)/);
+    assert.match(plain, /Boston \(3 verified alternatives\)/);
+    assert.match(plain, /Food.*Culture.*Travel\/Value/s);
+    assert.match(plain, /authored fixture/i);
+    assert.match(plain, /example.*not.*quote/i);
+    assert.match(plain, /exact retry.*same task/i);
+    assert.match(plain, /accepted.*failed/i);
+    assert.match(plain, /separate Node process/i);
+    assert.match(plain, /7 service calls.*1 exact retry/i);
+    assert.doesNotMatch(plain, /winner|ranked|recommended/i);
+    assert.match(plain, /Scope:.*share local code.*no reputation/i);
+    assert.match(plain, /Ephemeral:.*stopped.*not a durable authority proof/i);
+    assert.doesNotMatch(plain, /Limits:/);
+
+    // Manifest metadata is not an authority source: changing only its outer
+    // AgentRef must fail before any later (now stopped) fixture RPC read.
+    const firstAgent = result.alternatives[0]!.agent;
+    const domain = { chainId: firstAgent.chainId, registry: firstAgent.registry };
+    const stoppedClient = createPublicClient({ transport: http('http://127.0.0.1:1',
+      { retryCount: 0, timeout: 500 }) });
+    for (const target of ['success', 'fault'] as const) {
+      for (const field of ['chainId', 'registry'] as const) {
+        const changed = structuredClone(result);
+        const outer = target === 'success' ? changed.alternatives[0]!.agent : changed.fault.agent;
+        if (field === 'chainId') outer.chainId += 1;
+        else outer.registry = '0x7777777777777777777777777777777777777777';
+        await assert.rejects(verifySixServiceBatch(changed, stoppedClient, domain,
+          'http://127.0.0.1:1'), /outer agent reference/, `${target} ${field}`);
+      }
+    }
   });

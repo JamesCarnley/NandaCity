@@ -3,9 +3,10 @@
 NANDA City provides an identity/profile foundation, a real local ERC-8004
 registry demonstration, a two-Index local discovery fixture, a signed
 request/acceptance/completion format, and an owned loopback A2A task service.
-It now includes one fixture-labeled Chicago journey through an actual pinned
-NANDA Index and exact AgentCard to an A2A Task carrying signed City evidence,
-followed by an independent report.
+It now includes one fixture-labeled Chicago journey and a six-service comparison
+for Chicago and Boston through actual pinned NANDA Indexes and exact AgentCards,
+with signed A2A evidence checked in a separate Node process while the local
+chain and card server remain live. See [the comparison guide](docs/six-service-comparison.md).
 It does **not** provide public-chain deployment, real operator onboarding,
 reputation, a user interface, or a deployed service.
 
@@ -61,6 +62,7 @@ npm run build
 npm run check
 npm run demo:discovery -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 npm run demo:journey -- --index-checkout "$NANDA_INDEX_CHECKOUT"
+npm run demo:compare -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 ```
 
 `NANDA_INDEX_CHECKOUT` is required for `npm run test:integration` and

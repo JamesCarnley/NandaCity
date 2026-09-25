@@ -5,10 +5,12 @@ import { runIdentityDemo, type IdentityDemoResult } from './demo/identity.js';
 import { runTwoIndexDemo } from './demo/twoIndexes.js';
 import { runChicagoJourney } from './demo/chicagoJourney.js';
 import { formatJourneyPlain } from './demo/journeyReport.js';
+import { formatComparePlain, runSixServiceJourney } from './demo/sixServiceJourney.js';
 
 const usage = 'Usage: npm run demo:identity -- [--json]';
 const discoveryUsage = 'Usage: npm run demo:discovery -- --index-checkout /absolute/path [--json]';
 const journeyUsage = 'Usage: npm run demo:journey -- --index-checkout /absolute/path [--json]';
+const compareUsage = 'Usage: npm run demo:compare -- --index-checkout /absolute/path [--json]';
 
 export function formatIdentityDemoJson(result: IdentityDemoResult): string {
   return JSON.stringify(result, null, 2);
@@ -46,6 +48,30 @@ export async function runCli(
   output: Pick<NodeJS.WriteStream, 'write'> = process.stdout,
   errorOutput: Pick<NodeJS.WriteStream, 'write'> = process.stderr,
 ): Promise<number> {
+  if (args[0] === 'compare' && args[1] === 'demo') {
+    const indexFlag = args.indexOf('--index-checkout');
+    const checkout = indexFlag >= 0 ? args[indexFlag + 1] : undefined;
+    const remaining = args.slice(2).filter((argument, index) =>
+      argument !== '--json' && index + 2 !== indexFlag && index + 2 !== indexFlag + 1);
+    if (!checkout || !isAbsolute(checkout) || remaining.length > 0 ||
+      args.filter((argument) => argument === '--index-checkout').length !== 1 ||
+      args.filter((argument) => argument === '--json').length > 1) {
+      errorOutput.write(`${compareUsage}\n`);
+      if (checkout && !isAbsolute(checkout)) errorOutput.write('Index checkout must be absolute.\n');
+      return 2;
+    }
+    try {
+      const result = await runSixServiceJourney(checkout);
+      if (!result.independentProcessVerified || !result.tamperRejected) {
+        throw new Error('six-service live subprocess verification did not complete');
+      }
+      output.write(`${args.includes('--json') ? JSON.stringify(result, null, 2) : formatComparePlain(result)}\n`);
+      return 0;
+    } catch (error) {
+      errorOutput.write(`Six-service comparison failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 1;
+    }
+  }
   if (args[0] === 'journey' && args[1] === 'demo') {
     const indexFlag = args.indexOf('--index-checkout');
     const checkout = indexFlag >= 0 ? args[indexFlag + 1] : undefined;

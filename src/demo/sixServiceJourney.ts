@@ -1,4 +1,10 @@
+import { execFile } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import type { Address } from 'viem';
 
@@ -17,6 +23,7 @@ import { withSixServiceFixture, type FixtureService, type SixServiceFixture } fr
 type City = FixtureService['city'];
 type VerifiedCase = { evidence: JourneyEvidence; report: JourneyReport };
 type Calls = { messageSend: number; tasksGet: number; exactRetries: number };
+const execFileAsync = promisify(execFile);
 
 export type SixServiceJourneyResult = {
   mode: 'local-fixture';
@@ -32,6 +39,9 @@ export type SixServiceJourneyResult = {
   fault: { agent: AgentRef; evidence: JourneyEvidence; report: JourneyReport };
   executionOrder: Array<{ agentId: string; outcome: 'completed' | 'failed' }>;
   calls: Calls;
+  independentProcessVerified: boolean;
+  tamperRejected: boolean;
+  cleanup: { ownedResourcesStopped: true };
   limitations: string[];
 };
 
@@ -201,9 +211,56 @@ async function invoke(service: FixtureService, fixture: SixServiceFixture,
   return { verified: { evidence, report }, ...(retryResult ? { retry: retryResult } : {}) };
 }
 
+async function verifyInSeparateProcess(fixture: SixServiceFixture,
+  batch: Pick<SixServiceJourneyResult, 'mode' | 'alternatives' | 'fault'>): Promise<{
+    independentProcessVerified: true; tamperRejected: true;
+  }> {
+  const directory = await mkdtemp(join(tmpdir(), 'nandacity-six-verifier-'));
+  const currentModule = fileURLToPath(import.meta.url);
+  const builtMode = currentModule.endsWith('.js');
+  const script = join(dirname(currentModule), `verifySixServiceCli.${builtMode ? 'js' : 'ts'}`);
+  const cityRoot = resolve(dirname(currentModule), '../..');
+  const args = (path: string) => [
+    ...(builtMode ? [] : ['--import', 'tsx']), script,
+    '--evidence', path, '--rpc-url', fixture.rpcOrigin, '--card-origin', fixture.cardOrigin,
+    '--chain-id', String(fixture.domain.chainId), '--registry', fixture.domain.registry,
+  ];
+  const options = { cwd: cityRoot, env: { PATH: process.env['PATH'] ?? '' },
+    timeout: 60_000, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8' as const };
+  try {
+    const evidencePath = join(directory, 'original-evidence.json');
+    await writeFile(evidencePath, JSON.stringify(batch), { mode: 0o600 });
+    const { stdout } = await execFileAsync(process.execPath, args(evidencePath), options);
+    const verified = JSON.parse(stdout) as { verified?: boolean; cases?: Array<{ report?: JourneyReport }>;
+      fault?: { report?: JourneyReport } };
+    if (verified.verified !== true || verified.cases?.length !== 6 ||
+        verified.cases.some((item) => !item.report?.evidenceUsable || item.report.execution !== 'completed') ||
+        !verified.fault?.report?.evidenceUsable || verified.fault.report.execution !== 'failed') {
+      throw new Error('separate Node verifier did not confirm six successes and one accepted fault');
+    }
+    const tampered = structuredClone(batch);
+    const bytes = Buffer.from(tampered.alternatives[0]!.success.evidence.answerBase64!, 'base64');
+    bytes[0] = bytes[0]! ^ 1;
+    tampered.alternatives[0]!.success.evidence.answerBase64 = bytes.toString('base64');
+    const tamperedPath = join(directory, 'tampered-evidence.json');
+    await writeFile(tamperedPath, JSON.stringify(tampered), { mode: 0o600 });
+    let tamperRejected = false;
+    try {
+      await execFileAsync(process.execPath, args(tamperedPath), options);
+    } catch (error) {
+      const stderr = (error as { stderr?: string }).stderr ?? '';
+      tamperRejected = /Six-service verification failed: batch completion/.test(stderr);
+    }
+    if (!tamperRejected) throw new Error('separate Node verifier did not reject changed answer bytes');
+    return { independentProcessVerified: true, tamperRejected: true };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 /** Six owned synthetic services, two actual local Indexes, and bounded signed A2A journeys. */
 export async function runSixServiceJourney(indexCheckout: string): Promise<SixServiceJourneyResult> {
-  return withSixServiceFixture(indexCheckout, async (fixture) => {
+  const result = await withSixServiceFixture(indexCheckout, async (fixture) => {
     const calls: Calls = { messageSend: 0, tasksGet: 0, exactRetries: 0 };
     const alternatives: SixServiceJourneyResult['alternatives'] = [];
     const executionOrder: SixServiceJourneyResult['executionOrder'] = [];
@@ -226,16 +283,47 @@ export async function runSixServiceJourney(indexCheckout: string): Promise<SixSe
       }
     }
     if (!firstRetry || !acceptedFault) throw new Error('exact retry or accepted fault was not recorded');
+    const batch = { mode: 'local-fixture' as const, alternatives,
+      fault: { agent: faultService.agent, ...acceptedFault } };
+    const independent = await verifyInSeparateProcess(fixture, batch);
     return {
-      mode: 'local-fixture', indexSourceCommit: INDEX_SOURCE_COMMIT,
+      mode: 'local-fixture' as const, indexSourceCommit: INDEX_SOURCE_COMMIT,
       indexOrigins: fixture.indexOrigins, alternatives, retry: firstRetry,
-      fault: { agent: faultService.agent, ...acceptedFault }, executionOrder, calls,
+      fault: batch.fault, executionOrder, calls, ...independent,
       limitations: [
         'Authored synthetic fixture plans only; no live venue, event, price, travel, accessibility, or semantic-quality check.',
         'Three simulated operators have shared local code and one hosting failure domain; they are not independent businesses.',
         'Both local Indexes and the Ethereum chain stop at cleanup; exported observations are not durable state proofs.',
-        'Comparing three alternatives makes three service calls per city; no ranking, winner, or trust endorsement is asserted.',
+        'Separate Node verification uses the same owned test host and loopback chain; it is process separation, not an independent operator or state proof.',
+        'Comparing three alternatives makes three service calls per city; no ranking or trust endorsement is asserted.',
       ],
     };
   });
+  return { ...result, cleanup: { ownedResourcesStopped: true } };
+}
+
+/** Human comparison of already-verified authored plans; not a semantic-quality verdict. */
+export function formatComparePlain(result: SixServiceJourneyResult): string {
+  const lines = ['NANDA City local six-service comparison (synthetic fixture)'];
+  for (const city of ['Chicago', 'Boston'] as const) {
+    const items = result.alternatives.filter((item) => item.city === city);
+    lines.push(`${city} (${items.length} verified alternatives)`);
+    for (const item of items) {
+      const answer = JSON.parse(Buffer.from(item.success.evidence.answerBase64!, 'base64').toString('utf8')) as {
+        schedule: Array<{ place: string }>;
+        route: { mode: string };
+        budget: { estimatedTotalMinorUnits: number };
+      };
+      const label = { food: 'Food', culture: 'Culture', 'travel-value': 'Travel/Value' }[item.emphasis];
+      lines.push(`  ${label} (fixture operator ${item.operatorIndex + 1}, agent ${item.agent.agentId}): ` +
+        `${answer.schedule[0]!.place} → ${answer.schedule[1]!.place}; ` +
+        `${answer.route.mode}; example $${(answer.budget.estimatedTotalMinorUnits / 100).toFixed(2)} (not a verified quote).`);
+    }
+  }
+  lines.push('Sources: authored fixture concepts, conceptual routes, and example cost allocations; no live venue, event, availability, price, travel-time, accessibility, or quality check.');
+  lines.push(`Verification: ${result.alternatives.length} signed completions and one separate accepted/failed case rechecked by a separate Node process against the live local RPC and exact cards; same test host, not independent real-world custody.`);
+  lines.push(`Calls: 7 service calls for six plans plus the accepted fault, and 1 exact retry returned the same task (8 message/send attempts total).`);
+  lines.push('Scope: simulated operators share local code/hosting; no reputation ranking, independent business custody, or trust endorsement.');
+  lines.push('Ephemeral: local chain and Indexes stopped at cleanup; JSON is not a durable authority proof.');
+  return lines.join('\n');
 }

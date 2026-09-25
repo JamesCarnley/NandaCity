@@ -14,6 +14,7 @@
     "demo:identity": "node --import tsx src/cli.ts identity demo",
     "demo:discovery": "node --import tsx src/cli.ts discovery demo",
     "demo:journey": "node --import tsx src/cli.ts journey demo",
+    "demo:compare": "node --import tsx src/cli.ts compare demo",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run typecheck && npm test && npm run build && npm run test:integration"

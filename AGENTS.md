@@ -38,7 +38,10 @@ discovery demonstration, and pure signed-interaction format:
 - an owned loopback A2A 0.3 JSON-RPC subset with durable `message/send` and
   `tasks/get` tasks; and
 - one synthetic Chicago Index → AgentCard → A2A journey with separately
-  generated owner/runtime/caller keys and an independent-process report.
+  generated owner/runtime/caller keys and an independent-process report; and
+- six synthetic Chicago/Boston service journeys, three alternatives per city,
+  with a separate Node process rechecking seven signed cases against the live
+  owned loopback chain and exact cards before fixture teardown.
 
 Do not describe snapshot verification as current chain truth, liveness, safety,
 trust, or endorsement. `ownerAtPublication` must remain subordinate to the
@@ -60,6 +63,9 @@ the subset is not a complete A2A implementation.
 The journey JSON retains original evidence, but its stopped ephemeral Anvil is
 not a durable authority source; do not claim that later parties can independently
 re-read chain history from the export alone.
+The comparison's distinct verifier process shares the same test host and owned
+chain; it does not prove independent operator custody, live city facts, or
+semantic quality. The UI and reputation policy remain unbuilt.
 
 ## Public repository hygiene
 

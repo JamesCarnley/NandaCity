@@ -52,7 +52,7 @@ export type SixServiceFixture = {
   searches: Record<FixtureCity, Record<IndexName, FixtureSearch>>;
   indexOrigins: Record<IndexName, string>;
   ownerIsolationRejected: boolean;
-  cardOrigin: string; chain: PublicClient; domain: IdentityDomain;
+  cardOrigin: string; rpcOrigin: string; chain: PublicClient; domain: IdentityDomain;
   callerAddress: Address;
   signAsCaller: (request: CityRequest) => Promise<SignedEnvelope>;
 };
@@ -242,6 +242,7 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
         }
       }
       return run({ services, searches, indexOrigins, ownerIsolationRejected, cardOrigin,
+        rpcOrigin: rpcUrl,
         chain: verifier, domain, callerAddress: caller.address,
         signAsCaller: (request) => signRequest(request, caller) });
     });
