@@ -7,12 +7,14 @@ import { runChicagoJourney } from './demo/chicagoJourney.js';
 import { formatJourneyPlain } from './demo/journeyReport.js';
 import { formatComparePlain, runSixServiceJourney } from './demo/sixServiceJourney.js';
 import { writeStaticReport } from './report/writeReport.js';
+import { runExternalClientDemo } from './demo/externalClientJourney.js';
 
 const usage = 'Usage: npm run demo:identity -- [--json]';
 const discoveryUsage = 'Usage: npm run demo:discovery -- --index-checkout /absolute/path [--json]';
 const journeyUsage = 'Usage: npm run demo:journey -- --index-checkout /absolute/path [--json]';
 const compareUsage = 'Usage: npm run demo:compare -- --index-checkout /absolute/path [--json]';
 const reportUsage = 'Usage: npm run demo:report -- --index-checkout /absolute/path --html /absolute/report.html --evidence /absolute/evidence.json';
+const externalClientUsage = 'Usage: npm run demo:external-client -- --index-checkout /absolute/path --city Chicago|Boston [--json]';
 
 export function formatIdentityDemoJson(result: IdentityDemoResult): string {
   return JSON.stringify(result, null, 2);
@@ -50,6 +52,26 @@ export async function runCli(
   output: Pick<NodeJS.WriteStream, 'write'> = process.stdout,
   errorOutput: Pick<NodeJS.WriteStream, 'write'> = process.stderr,
 ): Promise<number> {
+  if (args[0] === 'external-client' && args[1] === 'demo') {
+    const checkout = args[3];
+    const city = args[5];
+    const json = args[6] === '--json';
+    if ((args.length !== 6 && args.length !== 7) || args[2] !== '--index-checkout' ||
+        args[4] !== '--city' || (args.length === 7 && !json) ||
+        !checkout || !isAbsolute(checkout) || (city !== 'Chicago' && city !== 'Boston')) {
+      errorOutput.write(`${externalClientUsage}\n`);
+      return 2;
+    }
+    try {
+      const result = await runExternalClientDemo(checkout, city);
+      output.write(`${json ? JSON.stringify(result, null, 2) :
+        `External client: ${city} agent ${result.selectedAgentId}; child and parent verified signed A2A completion; ${result.selectionReason}.`}\n`);
+      return 0;
+    } catch (error) {
+      errorOutput.write(`External client demo failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 1;
+    }
+  }
   if (args[0] === 'report' && args[1] === 'demo') {
     const fields = ['--index-checkout', '--html', '--evidence'] as const;
     const values = fields.map((field) => {

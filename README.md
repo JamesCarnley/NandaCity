@@ -9,8 +9,11 @@ with signed A2A evidence checked in a separate Node process while the local
 chain and card server remain live. A self-contained static comparison report
 can be exported with its unabridged evidence JSON. See
 [the comparison guide](docs/six-service-comparison.md).
+The [separate-client example](docs/external-client.md) runs a Node caller through
+Index discovery, exact card verification, and signed A2A invocation for either
+city, then the parent independently rechecks its exported evidence live.
 It does **not** provide public-chain deployment, real operator onboarding,
-reputation, a live user interface, or a deployed service.
+reputation, an interactive user interface, or a deployed service.
 
 The companion [NANDA Index fork](https://github.com/JamesCarnley/nanda-index-v2)
 provides exact per-service filtering and optional, read-only ERC-8004 following.
@@ -66,6 +69,8 @@ npm run demo:discovery -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 npm run demo:journey -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 npm run demo:compare -- --index-checkout "$NANDA_INDEX_CHECKOUT"
 npm run demo:report -- --index-checkout "$NANDA_INDEX_CHECKOUT" --html /absolute/output/comparison.html --evidence /absolute/output/evidence.json
+npm run demo:external-client -- --index-checkout "$NANDA_INDEX_CHECKOUT" --city Chicago
+npm run demo:external-client -- --index-checkout "$NANDA_INDEX_CHECKOUT" --city Boston --json
 ```
 
 `NANDA_INDEX_CHECKOUT` is required for `npm run test:integration` and
@@ -75,7 +80,7 @@ The checkout must have the exact
 pinned commit and no tracked/untracked changes; the harness rebuilds its Index
 server from source before launch. The tests do not silently skip Anvil, Docker,
 or the Index checkout. `npm run check` runs typechecking, all unit tests, the
-production build, and both real-chain integration suites. Generated TypeScript
+production build, and the real-chain/Index integration suite. Generated TypeScript
 files are written to `dist/` and are not committed.
 
 Before any Docker mutation, the demo resolves the selected Docker endpoint

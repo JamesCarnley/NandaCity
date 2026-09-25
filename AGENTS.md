@@ -41,7 +41,12 @@ discovery demonstration, and pure signed-interaction format:
   generated owner/runtime/caller keys and an independent-process report; and
 - six synthetic Chicago/Boston service journeys, three alternatives per city,
   with a separate Node process rechecking seven signed cases against the live
-  owned loopback chain and exact cards before fixture teardown.
+  owned loopback chain and exact cards before fixture teardown; and
+- a self-contained static HTML comparison with unabridged evidence JSON; and
+- a City-authored separate Node client process that owns an ephemeral caller key,
+  discovers one of three local candidates per city through both real Indexes,
+  invokes the published loopback A2A service, and exports evidence the parent
+  independently rechecks before cleanup.
 
 Do not describe snapshot verification as current chain truth, liveness, safety,
 trust, or endorsement. `ownerAtPublication` must remain subordinate to the
@@ -56,8 +61,9 @@ semantic quality. See [the City interaction format](docs/interaction-format.md).
 Do not broaden the local write path to a public or non-loopback RPC. The demo
 fetches AgentCards only from its own exact loopback origin/paths; arbitrary
 external card fetching is not supported. Index rows are candidates, not authority.
-Public-chain writes, deployed A2A service operation, reputation, and UI work
-remain outside this boundary. The loopback task service implements only
+Public-chain writes, deployed A2A service operation, reputation, and an
+interactive UI remain outside this boundary. The static HTML report is a
+read-only artifact, not an interactive selection UI. The loopback task service implements only
 `message/send` and `tasks/get`; body signatures do not authorize polling, and
 the subset is not a complete A2A implementation.
 The journey JSON retains original evidence, but its stopped ephemeral Anvil is
@@ -65,7 +71,7 @@ not a durable authority source; do not claim that later parties can independentl
 re-read chain history from the export alone.
 The comparison's distinct verifier process shares the same test host and owned
 chain; it does not prove independent operator custody, live city facts, or
-semantic quality. The UI and reputation policy remain unbuilt.
+semantic quality. The interactive UI and reputation policy remain unbuilt.
 
 ## Public repository hygiene
 

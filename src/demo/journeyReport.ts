@@ -3,12 +3,12 @@ import type { PublicClient } from 'viem';
 import { a2aTaskSchema, CITY_RESULT_DATA_TYPE, type A2ATask } from '../a2a/wire.js';
 import { verifyDiscoveryWithCard, type DiscoveredCandidate, type DiscoveryVerification,
   type IdentityDomain, type ServiceFilter } from '../discovery/verifyDiscovery.js';
+import { fetchOwnedCard } from '../discovery/cardClient.js';
 import { readIdentitySnapshot } from '../identity/registry.js';
 import { verifyProfile, type AuthoritySnapshot } from '../identity/verify.js';
 import { verifyInteraction, type InteractionFinding, type ContinuityFinding } from '../interaction/verify.js';
 import { decodeEnvelope } from '../interaction/signatures.js';
 import type { SignedEnvelope } from '../interaction/schema.js';
-import { fetchOwnedCard } from './twoIndexes.js';
 
 export type JourneyEvidence = {
   candidate: DiscoveredCandidate;
