@@ -619,6 +619,26 @@ test('execution timeout aborts cooperatively, does not block close, and cannot w
   const fixture = makeInteractionFixture();
   const envelope = await signRequest(fixture.request, fixture.caller);
   let sawAbort = false;
+  let executorSettled = false;
+  let executionStarted!: () => void;
+  let releaseExecutor!: () => void;
+  const started = new Promise<void>((resolve) => { executionStarted = resolve; });
+  const pendingExecution = new Promise<Uint8Array>((resolve) => {
+    releaseExecutor = () => {
+      executorSettled = true;
+      resolve(new TextEncoder().encode('{"late":"success"}'));
+    };
+  });
+  const withinOneSecond = async <T>(work: Promise<T>, reason: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([work, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(reason)), 1_000);
+      })]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
   const options = {
     storeDirectory: directory,
     runtimeSigner: fixture.runtime,
@@ -630,17 +650,17 @@ test('execution timeout aborts cooperatively, does not block close, and cannot w
     }),
     now: () => NOW,
     executionTimeoutMs: 20,
-    execute: async (_request: unknown, context: { signal: AbortSignal }) => new Promise<Uint8Array>((resolve) => {
+    execute: async (_request: unknown, context: { signal: AbortSignal }) => {
       context.signal.addEventListener('abort', () => { sawAbort = true; }, { once: true });
-      setTimeout(() => resolve(new TextEncoder().encode('{"late":"success"}')), 100);
-    }),
+      executionStarted();
+      return pendingExecution;
+    },
   };
   const service = await startLoopbackA2AService(options);
   const accepted = resultTask(await rpc(service.url, 1, 'message/send', sendParams(envelope)));
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  const closeStarted = Date.now();
-  await service.close();
-  assert.ok(Date.now() - closeStarted < 80, 'close waited on the timed-out executor');
+  await withinOneSecond(started, 'executor did not start');
+  await withinOneSecond(service.close(), 'close waited on the unresolved executor');
+  assert.equal(executorSettled, false, 'close waited for the executor result');
   assert.equal(sawAbort, true);
 
   const reopened = await startLoopbackA2AService({
@@ -653,6 +673,7 @@ test('execution timeout aborts cooperatively, does not block close, and cannot w
   const failedMetadata = cityMetadata(failed);
   assert.equal(failedMetadata.failureReason, 'execution-timeout');
   assert.ok(failedMetadata.completion);
+  releaseExecutor();
   await new Promise((resolve) => setTimeout(resolve, 120));
   const persisted = resultTask(await rpc(reopened.url, 3, 'tasks/get', { id: accepted.id }));
   assert.deepEqual(persisted, failed);
