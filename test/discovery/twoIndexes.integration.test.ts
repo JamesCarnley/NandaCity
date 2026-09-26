@@ -6,11 +6,58 @@ import test from 'node:test';
 import { createPublicClient, http } from 'viem';
 
 import { withOwnedAnvil } from '../../src/demo/anvil.js';
-import { withOwnedIndexes } from '../../src/demo/indexProcesses.js';
+import { resolveLocalDocker, withOwnedIndexes } from '../../src/demo/indexProcesses.js';
 import { runTwoIndexDemo, waitForBothWithdrawals } from '../../src/demo/twoIndexes.js';
 import { signalProbe } from './signalHarness.js';
 
 const checkout = process.env['NANDA_INDEX_CHECKOUT'];
+
+test('owned two-Index PostgreSQL uses only tmpfs and removes its container without a retained data volume',
+  { timeout: 90_000 }, async () => {
+    assert.ok(checkout);
+    const docker = await resolveLocalDocker();
+    const volumesBefore = new Set((await docker.command(['volume', 'ls', '-q'], 10_000)).split('\n').filter(Boolean));
+    let containerId = '';
+    let label = '';
+    let mounts: Array<{ Type: string; Destination: string; Name?: string; RW: boolean }> = [];
+    try {
+      await withOwnedAnvil(async (rpcUrl) => {
+        const client = createPublicClient({ transport: http(rpcUrl) });
+        const genesis = await client.getBlock({ blockNumber: 0n });
+        assert.ok(genesis.hash);
+        await withOwnedIndexes(checkout, {
+          chainId: 31_337, registry: '0x1111111111111111111111111111111111111111',
+          genesisHash: genesis.hash, startBlock: '0', adapter: 'nandacity-0.1', confirmations: 0,
+        }, { A: rpcUrl, B: rpcUrl }, async (owned) => {
+          containerId = owned.containerId;
+          assert.match(containerId, /^[0-9a-f]{64}$/);
+          label = await docker.command(['inspect', '--format', '{{index .Config.Labels "org.nandacity.owned-demo"}}', containerId], 10_000);
+          assert.match(label, /^city-[0-9a-f]{16}$/);
+          mounts = JSON.parse(await docker.command(['inspect', '--format', '{{json .Mounts}}', containerId], 10_000));
+          assert.equal((await fetch(`${owned.indexes.A.origin}/health`)).ok, true);
+          assert.equal((await fetch(`${owned.indexes.B.origin}/health`)).ok, true);
+        });
+      }, { genesisMarker: { blockNumber: 0n, timestamp: 1_700_000_000n } });
+      await assert.rejects(docker.command(['inspect', containerId], 10_000), /docker failed/);
+      assert.equal(mounts.length, 1);
+      assert.equal(mounts[0]?.Type, 'tmpfs', 'image-declared data volume must be overridden by tmpfs');
+      assert.equal(mounts[0]?.Destination, '/var/lib/postgresql/data');
+      assert.equal(mounts[0]?.RW, true);
+      assert.equal(mounts.some((mount) => mount.Type === 'volume'), false, 'no owned data volume may remain after teardown');
+    } finally {
+      // RED-only recovery: an unfixed run can leave its new anonymous volume.
+      // Remove only names observed on this exact, nonce-labelled test container,
+      // proven absent before this run. Never infer ownership of prior volumes.
+      if (/^[0-9a-f]{64}$/.test(containerId) && /^city-[0-9a-f]{16}$/.test(label)) {
+        for (const mount of mounts) {
+          if (mount.Type === 'volume' && mount.Name && /^[0-9a-f]{64}$/.test(mount.Name) && !volumesBefore.has(mount.Name)) {
+            const remaining = new Set((await docker.command(['volume', 'ls', '-q'], 10_000)).split('\n').filter(Boolean));
+            if (remaining.has(mount.Name)) await docker.command(['volume', 'rm', mount.Name], 10_000);
+          }
+        }
+      }
+    }
+  });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   for (const stage of ['anvil-preflight', 'container-acquiring', 'index', 'ready'] as const) {

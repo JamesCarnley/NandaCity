@@ -27,6 +27,9 @@ if (config.remote) {
         // The daemon did create it; the CLI response is lost during startup.
         process.exitCode = 1;
       } else { setTimeout(finish, config.stage === 'container-acquiring' ? 1500 : 0); }
-    } else { finish(); }
+    } else {
+      if (args.includes('rm') && !error) record({ stage: 'container-removed', args: args.slice(args.indexOf('rm')) });
+      finish();
+    }
   });
 }

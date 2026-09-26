@@ -145,6 +145,16 @@ export function assertOwnedIndexReady(body: unknown, origin: string, sourceId: s
   }
 }
 
+/** The disposable database must not inherit the image's anonymous data volume. */
+export function assertOwnedPostgresTmpfs(mounts: unknown): void {
+  if (!Array.isArray(mounts) || mounts.length !== 1) throw new Error('owned PostgreSQL requires only its data tmpfs mount');
+  const mount = mounts[0] as { Type?: unknown; Destination?: unknown; RW?: unknown; Name?: unknown; Source?: unknown } | null;
+  if (!mount || mount.Type !== 'tmpfs' || mount.Destination !== '/var/lib/postgresql/data' || mount.RW !== true ||
+    (mount.Name !== undefined && mount.Name !== '') || (mount.Source !== undefined && mount.Source !== '')) {
+    throw new Error('owned PostgreSQL requires a writable data tmpfs without a volume or bind source');
+  }
+}
+
 async function waitReady(origin: string, child: ChildProcess, sourceId: string,
   spawnError: () => Error | null): Promise<void> {
   const deadline = Date.now() + 15_000;
@@ -222,9 +232,14 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
     const label = await docker.command(['inspect', '--format', `{{index .Config.Labels "${LABEL}"}}`, containerId], 10_000);
     if (label !== ownedLabel) throw new Error('PostgreSQL ownership label mismatch');
   }
+  async function assertEphemeralData(): Promise<void> {
+    await assertOwned();
+    const mounts = await docker.command(['inspect', '--format', '{{json .Mounts}}', containerId], 10_000);
+    assertOwnedPostgresTmpfs(JSON.parse(mounts) as unknown);
+  }
   async function sql(statement: string): Promise<void> {
     active();
-    await assertOwned();
+    await assertEphemeralData();
     active();
     await docker.command(['exec', '-e', `PGPASSWORD=${password}`, containerId,
       'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-c', statement], 10_000);
@@ -232,6 +247,8 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
   async function start(name: 'A' | 'B'): Promise<OwnedIndex> {
     active();
     if (processes.has(name)) throw new Error(`Index ${name} already running`);
+    await assertEphemeralData();
+    active();
     const database = name === 'A' ? dbA : dbB;
     const indexPort = await port();
     active();
@@ -279,10 +296,12 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
     containerAcquisitionStarted = true;
     // Record the returned ID before checking cancellation. A deterministic name
     // also recovers ownership if Docker mutates successfully but its receipt fails.
+    // --mount exposes tmpfs in .Mounts, so the same guard can reject image-created volumes.
     containerId = await docker.command(['run', '-d', '--name', containerName, '--label', `${LABEL}=${ownedLabel}`,
+      '--mount', 'type=tmpfs,destination=/var/lib/postgresql/data',
       '-e', `POSTGRES_PASSWORD=${password}`, '-p', '127.0.0.1::5432', 'postgres:16'], 120_000);
     active();
-    await assertOwned();
+    await assertEphemeralData();
     active();
     const binding = await docker.command(['port', containerId, '5432/tcp'], 10_000);
     const match = /^127\.0\.0\.1:(\d+)$/.exec(binding);
@@ -322,7 +341,8 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
           `name=^/${containerName}$`], 10_000);
         if (containerId && !/^[0-9a-f]{64}$/.test(containerId)) throw new Error('ambiguous owned container lookup');
       }
-      if (containerId) { await assertOwned(); await docker.command(['rm', '-f', containerId], 10_000); }
+      // Remove anonymous volumes too if acquisition failed before mount validation.
+      if (containerId) { await assertOwned(); await docker.command(['rm', '-fv', containerId], 10_000); }
     }, runFailures);
   return result;
 }

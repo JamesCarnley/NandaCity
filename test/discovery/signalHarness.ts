@@ -137,8 +137,13 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
     }
     for (const event of recorded) {
       if (event.pid) assert.equal(alive(event.pid), false, `owned ${event.stage} ${event.pid} survived`);
-      if (event.containerId) assert.throws(() => execFileSync(docker,
-        [...dockerArgs, 'inspect', event.containerId!], { stdio: 'ignore' }), 'owned container survived');
+      if (event.containerId) {
+        assert.throws(() => execFileSync(docker,
+          [...dockerArgs, 'inspect', event.containerId!], { stdio: 'ignore' }), 'owned container survived');
+        assert.ok(recorded.some((entry) => entry.stage === 'container-removed' &&
+          JSON.stringify(entry.args) === JSON.stringify(['rm', '-fv', event.containerId])),
+        'confirmed owned container removal must include anonymous-volume cleanup');
+      }
       for (const origin of [...(event.origins ?? []), ...(event.origin ? [event.origin] : [])]) {
         await assert.rejects(fetch(`${origin}/health`, { signal: AbortSignal.timeout(500) }));
       }
@@ -173,7 +178,7 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
             '{{index .Config.Labels "org.nandacity.owned-demo"}}', event.containerId],
           { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
           assert.match(label, /^city-[0-9a-f]{16}$/);
-          execFileSync(docker, [...dockerArgs, 'rm', '-f', event.containerId], { stdio: 'ignore' });
+          execFileSync(docker, [...dockerArgs, 'rm', '-fv', event.containerId], { stdio: 'ignore' });
         } catch { /* already removed */ }
       }
     }

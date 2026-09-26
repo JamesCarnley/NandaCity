@@ -8,6 +8,22 @@ import { recordedCli, events } from './signalHarness.js';
 import { assertOwnedIndexReady, resolveLocalDocker, safeCommandFailure, settleOwnedCleanup, withOwnedIndexes } from '../../src/demo/indexProcesses.js';
 import { withOwnedLifecycle } from '../../src/demo/ownedLifecycle.js';
 
+test('owned PostgreSQL refuses persisted, missing, duplicate or unwritable data mounts', async () => {
+  const module = await import('../../src/demo/indexProcesses.js') as
+    { assertOwnedPostgresTmpfs?: (mounts: unknown) => void };
+  assert.equal(typeof module.assertOwnedPostgresTmpfs, 'function', 'owned PostgreSQL must validate its ephemeral data mount');
+  const check = module.assertOwnedPostgresTmpfs!;
+  const data = { Type: 'tmpfs', Source: '', Destination: '/var/lib/postgresql/data', Mode: '', RW: true, Propagation: '' };
+  assert.doesNotThrow(() => check([data]));
+  for (const invalid of [undefined, null, {}, [], [null], [data, data],
+    [{ ...data, Type: 'volume', Name: 'anonymous-test-volume', Source: '/var/lib/docker/volumes/anonymous-test-volume/_data' }],
+    [{ ...data, Type: 'bind', Source: '/host/private-data' }],
+    [{ ...data, Destination: '/different-data' }], [{ ...data, RW: false }],
+    [{ ...data, Name: 'unexpected-volume' }], [{ ...data, Source: '/persisted-data' }],
+    [data, { Type: 'volume', Destination: '/extra', Name: 'another-volume', RW: true }],
+  ]) assert.throws(() => check(invalid), /PostgreSQL.*tmpfs/);
+});
+
 test('owned RPC cancellation composes with the transport request timeout', async () => {
   const lifecycleModule = await import('../../src/demo/ownedLifecycle.js') as
     { ownedFetch?: typeof fetch };
