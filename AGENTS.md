@@ -47,6 +47,10 @@ discovery demonstration, and pure signed-interaction format:
   numbered-block canonicality and registry storage through a configured RPC; its
   findings are RPC-derived, not finality or cryptographic state proofs, and do not
   establish historical signature existence; and
+- a strict caller-private supporting-bundle codec and read-only historical
+  composition that rebuilds original authority at the request's signed numbered
+  basis, separately from publication/revocation and without a live provider;
+  private requests/cards are not returned in its findings or uploaded to Indexes; and
 - an owned loopback A2A 0.3 JSON-RPC subset with durable `message/send` and
   `tasks/get` tasks; and
 - one synthetic Chicago Index → AgentCard → A2A journey with separately

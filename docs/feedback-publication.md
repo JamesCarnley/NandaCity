@@ -181,6 +181,98 @@ that claimed time. `historicalExistence` and `historicalOrdering` remain `unknow
 document commitment at a publication block cannot establish that acceptance
 signatures existed earlier. The pure historical verifier is unchanged.
 
+## Caller-private supporting bundle and historical read
+
+`encodeSupportingBundle(value: unknown)` and
+`decodeSupportingBundle(bytes: Uint8Array)` in `src/feedback/supportingBundle.ts`
+preserve a caller-owned bundle with only these fields:
+
+```ts
+const bundle = encodeSupportingBundle({
+  version: '0.1',
+  request,       // Existing signed request envelope
+  acceptance,    // Existing signed acceptance envelope
+  completion,    // Optional signed completion envelope; omit if unavailable
+  cardBase64,    // Exact original AgentCard bytes, canonical padded Base64
+});
+```
+
+The outer compact UTF-8 JSON is bounded to **128 KiB** before parsing; the
+opaque card has the existing **64 KiB** byte bound. Existing request and
+acceptance/completion payload limits and expected statement kinds still apply.
+The codec returns copied outer `bytes`, decoded `request`, `acceptance`, optional
+`completion` envelopes/statements, and copied `cardBytes`. It preserves the exact
+signed payload and signature bytes, without interpreting the card or verifying
+signature authority. It checks depth before recursive/stringify operations,
+including inside Base64 payloads. Duplicate or unknown fields, malformed UTF-8/
+Unicode, BOM, noncompact JSON, noncanonical Base64 and oversized inputs reject.
+The encoder validates before serialization so unknown `undefined` fields cannot
+disappear. A `SupportingBundleError` exposes controlled `code` and `diagnostic`
+values: missing required top-level fields are `bundle-incomplete`; malformed
+fields or signed envelopes are `bundle-malformed`. No private error text is echoed.
+
+Keep this bundle private. It contains the caller's request preferences and is
+**not** the public feedback document. No answer, full Task, snapshot, URL, key,
+feedback document or Index metadata belongs in the outer bundle. This library
+does not save, upload or fetch it; file permissions, bounded file reads and
+explicit sharing decisions remain the caller's responsibility.
+
+`readHistoricalFeedback` in `src/feedback/historicalRead.ts` composes the existing
+pure historical verifier with the separate publication observation:
+
+```ts
+const result = await readHistoricalFeedback({
+  client,
+  domain: { chainId, identityRegistry, reputationRegistry, genesisHash },
+  eventRef,
+  observationBlock: selectedBlockNumber, // Required bigint, never latest
+  documentBytes: retainedPublicDocumentBytes, // Or null
+  bundleBytes: bundle.bytes,                 // Or null
+});
+```
+
+The domain and block-zero genesis hash are explicit caller configuration, never
+selected by the bundle or an Index. Both the request and feedback service domains
+must match before either identity subject is read. Original authority has its own
+chain/genesis checks, independent of the publication reader's checks. It reads
+the Identity snapshot at the request's signed `profileBasis.blockNumber`, checks
+the returned number **and** hash, and calls the existing `verifyProfile` with the
+chain-owned original URI and retained exact card. It never consults a current
+owner, current endpoint/runtime key, live provider, wall-clock deadline, answer
+bytes or latest block. Historical profile IDs beyond the registration codec's
+safe-integer range explicitly remain unavailable (`profile-agent-id-unsupported`).
+Configure the RPC transport with bounded responses/timeouts and no retries; the
+owned tests use the existing 512 KiB/5-second response wrapper. No scanning or URI
+fetch is performed.
+
+The JSON-safe result has separate components, not an overall success or rating:
+
+- `bundle`: `available`, `absent`, `incomplete` or `malformed`, with stable diagnostic
+  codes. It does not return private request or card bytes.
+- `originalAuthority`: `matched`, `mismatched` or `unavailable`, diagnostic codes,
+  `rpc-derived-not-state-proof` qualification, the request-declared `requestedBasis`,
+  and an independently read original numbered `basis` when obtained. A match
+  concerns original profile binding, not the validity of every supplied signature.
+- `publication`: the existing publication-reader observation, unchanged. It remains
+  available when the bundle is missing/invalid; public document findings still
+  include the retained public document as before.
+- `historical`: `evaluated` with the unchanged pure findings, or `not-evaluated`
+  with an explicit missing/malformed bundle/document reason. Unavailable or
+  mismatched original authority is passed as `null` to that verifier, so supplied
+  cryptographic findings survive without silently acquiring profile authority.
+- `answerEvidence`: always `not-supplied`. A linked signed completion is not
+  evidence that retained answer bytes match, that the outcome is true, or that the
+  answer is good. A post-deadline no-result observation remains a reviewer claim.
+
+After composition the original numbered hash is rechecked. Change or failure
+downgrades original authority and recomputes pure findings with `null`; the prior
+snapshot basis remains a record of what was read, not a valid current qualification.
+Publication revocation, orphaning or unavailability never erases retained signed
+history. Each component has its own numbered RPC-derived qualification; the
+composition is not an atomic global view, state proof, finality proof or evidence
+that signatures existed before runtime-key retirement. `historicalExistence` and
+`historicalOrdering` remain `unknown`.
+
 ## Deliberately separate findings
 
 Signature validity, request/acceptance linkage, original owner-published runtime
@@ -192,7 +284,7 @@ are chronology claims. Original profile reads are RPC-derived, not state proofs;
 the pure verifier still reports historical existence/ordering as unknown and
 publication/revocation as unevaluated.
 
-Neither module publishes evidence artifacts, ensures URI availability, proves
+None of these readers/codecs publishes evidence artifacts, ensures URI availability, proves
 independent customers, resists Sybils, ranks services, establishes economic finality,
 or retains a durable chain after the owned Anvil is stopped. Two-Index retention,
 reorg reconciliation, and second-client replay remain separate work.
