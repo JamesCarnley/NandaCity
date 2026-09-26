@@ -7,7 +7,7 @@ and two-Index integration suites: Anvil 1.7.1 must be on `PATH`, Docker must be
 available, and `NANDA_INDEX_CHECKOUT` must point to a clean checkout of the
 public pinned Index commit in `src/demo/indexProcesses.ts`. The harness builds
 that source before launching it. Tests use Node's test runner through `tsx`
-under `test/identity/`, `test/discovery/`, and `test/interaction/`.
+under `test/identity/`, `test/discovery/`, `test/interaction/`, and `test/feedback/`.
 
 Tests should exercise the real codec and verifier with complete literal fixtures.
 For behavior changes, add a focused failing test first, observe the expected
@@ -35,6 +35,11 @@ discovery demonstration, and pure signed-interaction format:
   signatures with a separate owner-published runtime receipt signer; and
 - pure linked-evidence checks over explicit profile, current-authority,
   continuity, answer-byte and observation-clock inputs; and
+- strict exact-byte reviewer-signed feedback, a pure historical evidence verifier,
+  and a bounded full-envelope document codec; and
+- owned loopback Reputation 2.0.0 publication/revocation with exact contract
+  projections, original-block profile verification, restart-safe prepared raw
+  transactions, and receipt/event observations (not canonical read-back); and
 - an owned loopback A2A 0.3 JSON-RPC subset with durable `message/send` and
   `tasks/get` tasks; and
 - one synthetic Chicago Index → AgentCard → A2A journey with separately
@@ -61,7 +66,7 @@ semantic quality. See [the City interaction format](docs/interaction-format.md).
 Do not broaden the local write path to a public or non-loopback RPC. The demo
 fetches AgentCards only from its own exact loopback origin/paths; arbitrary
 external card fetching is not supported. Index rows are candidates, not authority.
-Public-chain writes, deployed A2A service operation, reputation, and an
+Public-chain writes, deployed A2A service operation, reputation ranking, and an
 interactive UI remain outside this boundary. The static HTML report is a
 read-only artifact, not an interactive selection UI. The loopback task service implements only
 `message/send` and `tasks/get`; body signatures do not authorize polling, and
@@ -72,6 +77,10 @@ re-read chain history from the export alone.
 The comparison's distinct verifier process shares the same test host and owned
 chain; it does not prove independent operator custody, live city facts, or
 semantic quality. The interactive UI and reputation policy remain unbuilt.
+Local feedback publication is not independent canonical read-back, document
+availability, historical signature ordering, service quality, or Index retention.
+Acceptance is request acceptance, not provider permission to review. Keep the
+historical verifier pure. See [local feedback publication](docs/feedback-publication.md).
 
 ## Public repository hygiene
 
