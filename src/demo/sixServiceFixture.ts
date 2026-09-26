@@ -10,9 +10,12 @@ import { createPublicClient, createTestClient, createWalletClient, http, parseEt
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 import { startLoopbackA2AService, type LoopbackA2AService } from '../a2a/service.js';
+import { observeRequestAuthority } from '../a2a/authority.js';
+import type { IdentityContinuityDomain } from '../identity/continuity.js';
+import { boundRpcFetch } from '../identity/rpcTransport.js';
 import { syntheticEveningPlan, type FixtureEmphasis } from '../a2a/answer.js';
 import { searchIndexes, type IndexSearchResult } from '../discovery/indexClient.js';
-import { verifyDiscoveryWithCard, type DiscoveryVerification, type IdentityDomain,
+import { verifyDiscoveryWithCard, type DiscoveryVerification,
   type ServiceFilter } from '../discovery/verifyDiscovery.js';
 import { readIdentitySnapshot } from '../identity/registry.js';
 import { verifyProfile, type AgentRef, type VerifiedProfile } from '../identity/verify.js';
@@ -21,7 +24,7 @@ import type { CityRequest, SignedEnvelope } from '../interaction/schema.js';
 import { withOwnedAnvil } from './anvil.js';
 import { withOwnedIndexes } from './indexProcesses.js';
 import { checkOwnedCancellation, ownedFetch } from './ownedLifecycle.js';
-import { boston, chicago, deployRegistry, published, receipt, registryAbi } from './registryFixture.js';
+import { boston, chicago, deployRegistryWithDomain, published, receipt, registryAbi } from './registryFixture.js';
 import { fetchOwnedCard, listenOwnedServer } from './twoIndexes.js';
 
 const CHAIN_ID = 31_337;
@@ -52,7 +55,7 @@ export type SixServiceFixture = {
   searches: Record<FixtureCity, Record<IndexName, FixtureSearch>>;
   indexOrigins: Record<IndexName, string>;
   ownerIsolationRejected: boolean;
-  cardOrigin: string; rpcOrigin: string; chain: PublicClient; domain: IdentityDomain;
+  cardOrigin: string; rpcOrigin: string; chain: PublicClient; domain: IdentityContinuityDomain;
   callerAddress: Address;
   signAsCaller: (request: CityRequest) => Promise<SignedEnvelope>;
 };
@@ -90,12 +93,12 @@ async function waitForSearches(origins: Record<IndexName, string>): Promise<
 
 async function scenario<T>(rpcUrl: string, indexCheckout: string,
   run: (fixture: SixServiceFixture) => Promise<T>): Promise<T> {
-  const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000, fetchFn: ownedFetch });
+  const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000, fetchFn: boundRpcFetch(ownedFetch) });
   const chain = createPublicClient({ transport, pollingInterval: 50 });
   const verifier = createPublicClient({ transport: http(rpcUrl, { retryCount: 0,
-    timeout: 5_000, fetchFn: ownedFetch }) });
+    timeout: 5_000, fetchFn: boundRpcFetch(ownedFetch) }) });
   const serviceChain = createPublicClient({ transport: http(rpcUrl, { retryCount: 0,
-    timeout: 5_000, fetchFn: ownedFetch }) });
+    timeout: 5_000, fetchFn: boundRpcFetch(ownedFetch) }) });
   const testClient = createTestClient({ mode: 'anvil', transport });
   const admin = privateKeyToAccount(generatePrivateKey());
   const operators = emphases.map(() => privateKeyToAccount(generatePrivateKey()));
@@ -105,10 +108,10 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
   }
   const adminWallet = createWalletClient({ account: admin, transport });
   const wallets = operators.map((operator) => createWalletClient({ account: operator, transport }));
-  const registry = await deployRegistry(chain, adminWallet);
+  const domain = await deployRegistryWithDomain(chain, adminWallet);
+  const registry = domain.registry;
   const genesis = await chain.getBlock({ blockNumber: 0n });
   assert.ok(genesis.hash);
-  const domain = { chainId: CHAIN_ID, registry };
   const cards = new Map<string, Uint8Array>();
   const cardServer = createServer((request, response) => {
     const id = /^\/cards\/([0-9]+)\.json$/.exec(request.url ?? '')?.[1];
@@ -136,16 +139,12 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
         authorityStates.push(state);
         const service = await startLoopbackA2AService({ storeDirectory, runtimeSigner: runtime,
           now: utcNow,
-          observeAuthority: async () => {
+          observeAuthority: async (request) => {
             if (!state.agent || !state.profile || !state.cardBytes) {
               throw new Error('owned six-service fixture not yet registered');
             }
-            const snapshot = await readIdentitySnapshot(serviceChain, state.agent);
-            const currentProfile = verifyProfile({ agent: state.agent, agentURI: snapshot.agentURI,
-              cardBytes: state.cardBytes }, snapshot);
-            const continuity = snapshot.blockNumber === state.profile.source.blockNumber &&
-              snapshot.blockHash === state.profile.source.blockHash ? 'unchanged' : 'unknown';
-            return { basisProfile: state.profile, currentProfile, continuity, observedAt: utcNow() };
+            return observeRequestAuthority(serviceChain, { domain, agent: state.agent,
+              cardBytes: state.cardBytes, now: utcNow }, request);
           },
           execute: async (request) => {
             if (request.input.city !== city) {
@@ -204,7 +203,7 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
       throw new Error('simulated operator A could alter operator B registration');
     }
     // All registrations and the denied cross-owner attempt are settled. Freeze one
-    // common uncached chain basis for the six services; later movement stays unknown.
+    // common uncached initial basis for the six services. Each request resolves its own basis.
     // getBlockNumber() may be cached before the final setAgentURI is mined.
     const finalBlock = BigInt(settledSnapshot.blockNumber);
     if (services.some((service) => finalBlock < BigInt(service.profile.source.blockNumber))) {

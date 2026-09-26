@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, createTestClient, http } from 'viem';
 
 import { CITY_REQUEST_DATA_TYPE } from '../../src/a2a/service.js';
 import { a2aTaskSchema, type A2ATask } from '../../src/a2a/wire.js';
@@ -204,6 +204,24 @@ test('journey verifier separates Index publication N from the later signed reque
       assert.equal(valid.request?.profileBasis, 'matched');
       assert.equal(valid.evidenceUsable, true, JSON.stringify(valid.reasons));
 
+      const control = createTestClient({ mode: 'anvil', transport: http(fixture.rpcOrigin) });
+      await control.mine({ blocks: 2 });
+      const advanced = await verifyJourneyEvidence(evidence, fixture.chain, fixture.domain,
+        fixture.searches.Chicago.A.filter, fixture.cardOrigin);
+      assert.equal(advanced.evidenceUsable, true, 'unrelated advancement must not invalidate the exported observation');
+      assert.equal(advanced.authorityObservations?.exported.blockNumber, currentObservation.blockNumber);
+      assert.ok(BigInt(advanced.authorityObservations!.latest.blockNumber) > BigInt(currentObservation.blockNumber));
+      const forged = await verifyJourneyEvidence({ ...evidence, currentObservation: {
+        ...evidence.currentObservation, agentURI: 'data:,forged' } }, fixture.chain, fixture.domain,
+      fixture.searches.Chicago.A.filter, fixture.cardOrigin);
+      assert.equal(forged.firstBrokenBoundary, 'current-authority');
+      assert.equal(forged.evidenceUsable, false);
+      const unknownDomain = await verifyJourneyEvidence(evidence, fixture.chain,
+        { ...fixture.domain, genesisHash: `0x${'ab'.repeat(32)}` },
+        fixture.searches.Chicago.A.filter, fixture.cardOrigin);
+      assert.equal(unknownDomain.firstBrokenBoundary, 'authority-continuity');
+      assert.equal(unknownDomain.continuity, 'unknown');
+
       const wrongBasis = await verifyJourneyEvidence({ ...evidence,
         basisObservation: await readIdentitySnapshot(fixture.chain, service.agent,
           BigInt(candidate.observationBlock.number)) }, fixture.chain, fixture.domain,
@@ -351,7 +369,9 @@ test('six alternatives complete through actual Indexes, with an exact retry and 
     // Manifest metadata is not an authority source: changing only its outer
     // AgentRef must fail before any later (now stopped) fixture RPC read.
     const firstAgent = result.alternatives[0]!.agent;
-    const domain = { chainId: firstAgent.chainId, registry: firstAgent.registry };
+    const domain = { chainId: firstAgent.chainId, registry: firstAgent.registry,
+      genesisHash: `0x${'00'.repeat(32)}` as const,
+      knownImplementation: { address: firstAgent.registry, codeHash: `0x${'00'.repeat(32)}` as const } };
     const stoppedClient = createPublicClient({ transport: http('http://127.0.0.1:1',
       { retryCount: 0, timeout: 500 }) });
     for (const target of ['success', 'fault'] as const) {

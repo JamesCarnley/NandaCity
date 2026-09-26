@@ -43,7 +43,7 @@ export type ExecutionContext = { taskId: string; contextId: string; signal: Abor
 export type LoopbackServiceOptions = {
   storeDirectory: string;
   runtimeSigner: PrivateKeyAccount;
-  observeAuthority: () => Promise<AuthorityObservation>;
+  observeAuthority: (request: CityRequest) => Promise<AuthorityObservation>;
   now: () => string;
   executionTimeoutMs?: number;
   execute?: (request: CityRequest, context: ExecutionContext) => Promise<Uint8Array>;
@@ -192,7 +192,7 @@ class CityA2ARuntime {
         throw rpcFault(-32011, 'Acceptance time is outside the signed request window', 'acceptance-time-invalid');
       }
       let observation: AuthorityObservation;
-      try { observation = await this.options.observeAuthority(); }
+      try { observation = await this.options.observeAuthority(request); }
       catch { throw rpcFault(-32010, 'Authority observation unavailable', 'authority-unavailable'); }
       if (Date.parse(acceptedAt) > Date.parse(observation.observedAt)) {
         throw rpcFault(-32010, 'Authority observation predates acceptance', 'authority-observation-stale');
@@ -406,7 +406,9 @@ class CityA2ARuntime {
       return { reason: 'terminal-time-invalid' };
     }
     let observation: AuthorityObservation;
-    try { observation = await this.options.observeAuthority(); }
+    const request = decodeEnvelope(record.requestEnvelope).statement.value;
+    if (request.kind !== 'request') return { reason: 'request-evidence-invalid' };
+    try { observation = await this.options.observeAuthority(request); }
     catch { return { reason: 'authority-unavailable' }; }
     if (!isUtcSecond(observation.observedAt)) return { reason: 'authority-observation-invalid' };
     if (Date.parse(claimedAt) > Date.parse(observation.observedAt)) {

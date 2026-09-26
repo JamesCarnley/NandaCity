@@ -2,12 +2,13 @@ import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { createPublicClient, http, isAddress, type Address } from 'viem';
+import { createPublicClient, http, isAddress, type Address, type Hex } from 'viem';
 
 import { verifyJourneyEvidence, type JourneyEvidence } from './journeyReport.js';
 import { chicago } from './registryFixture.js';
+import { boundedRpcFetch } from '../identity/rpcTransport.js';
 
-const usage = 'Usage: node --import tsx src/demo/verifyJourneyCli.ts --evidence /absolute/file.json --rpc-url http://127.0.0.1:PORT --card-origin http://127.0.0.1:PORT --chain-id 31337 --registry 0x...';
+const usage = 'Usage: node --import tsx src/demo/verifyJourneyCli.ts --evidence /absolute/file.json --rpc-url http://127.0.0.1:PORT --card-origin http://127.0.0.1:PORT --chain-id 31337 --registry 0x... --genesis-hash 0x... --implementation 0x... --implementation-code-hash 0x...';
 
 function option(args: string[], flag: string): string {
   const index = args.indexOf(flag);
@@ -26,7 +27,7 @@ function loopbackOrigin(raw: string): string {
 
 export async function runVerifyJourneyCli(args = process.argv.slice(2)): Promise<number> {
   try {
-    if (args.length !== 10) throw new Error(usage);
+    if (args.length !== 16) throw new Error(usage);
     const file = option(args, '--evidence');
     if (!isAbsolute(file)) throw new Error('evidence path must be absolute');
     const rpcOrigin = loopbackOrigin(option(args, '--rpc-url'));
@@ -45,10 +46,13 @@ export async function runVerifyJourneyCli(args = process.argv.slice(2)): Promise
       const value = item as Record<string, unknown>;
       return (value['evidence'] ?? value) as JourneyEvidence;
     };
-    const domain = { chainId, registry: registry as Address };
+    const domain = { chainId, registry: registry as Address,
+      genesisHash: option(args, '--genesis-hash') as Hex,
+      knownImplementation: { address: option(args, '--implementation') as Address,
+        codeHash: option(args, '--implementation-code-hash') as Hex } };
     const filter = { capabilityIds: ['urn:nandacity:capability:evening-plan:0.1'],
       areaServed: [chicago], interfaces: ['application/a2a+json;version=0.3'] };
-    const client = createPublicClient({ transport: http(rpcOrigin, { retryCount: 0, timeout: 5_000 }) });
+    const client = createPublicClient({ transport: http(rpcOrigin, { retryCount: 0, timeout: 5_000, fetchFn: boundedRpcFetch }) });
     const success = await verifyJourneyEvidence(caseEvidence('success'),
       client, domain, filter, cardOrigin);
     const failure = await verifyJourneyEvidence(caseEvidence('failure'),

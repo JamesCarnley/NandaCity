@@ -12,7 +12,10 @@ const configSchema = z.strictObject({
   cardOrigin: origin,
   serviceOrigins: z.array(origin).min(1).max(6),
   domain: z.strictObject({ chainId: z.number().int().positive().safe(),
-    registry: z.string().regex(/^0x[0-9a-fA-F]{40}$/) }),
+    registry: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+    genesisHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+    knownImplementation: z.strictObject({ address: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+      codeHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/) }) }),
   chosenAgentId: z.string().regex(/^(0|[1-9][0-9]*)$/).optional(),
 });
 

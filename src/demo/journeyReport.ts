@@ -2,7 +2,8 @@ import type { PublicClient } from 'viem';
 
 import { a2aTaskSchema, CITY_RESULT_DATA_TYPE, type A2ATask } from '../a2a/wire.js';
 import { verifyDiscoveryWithCard, type DiscoveredCandidate, type DiscoveryVerification,
-  type IdentityDomain, type ServiceFilter } from '../discovery/verifyDiscovery.js';
+  type ServiceFilter } from '../discovery/verifyDiscovery.js';
+import { continuityLimits, readIdentityContinuity, type IdentityContinuityDomain } from '../identity/continuity.js';
 import { fetchOwnedCard } from '../discovery/cardClient.js';
 import { readIdentitySnapshot } from '../identity/registry.js';
 import { verifyProfile, type AuthoritySnapshot } from '../identity/verify.js';
@@ -33,6 +34,8 @@ export type JourneyReport = {
   execution: 'completed' | 'failed' | 'inconsistent' | 'not-tested';
   contentValidation: 'not-tested';
   evidenceUsable: boolean;
+  /** Export provenance and live usability are separate numbered observations. */
+  authorityObservations?: { exported: AuthoritySnapshot; latest: AuthoritySnapshot };
   firstBrokenBoundary: 'evidence' | 'discovery' | 'authority-basis' |
     'current-authority' | 'authority-continuity' | 'interaction' | 'acceptance' | 'execution' | 'answer' | null;
   reasons: string[];
@@ -72,7 +75,8 @@ function taskConsistency(task: A2ATask, evidence: JourneyEvidence): JourneyRepor
 
 const limitations = [
   'Local synthetic fixture only; no live hours, bookings, travel times, or semantic quality verified.',
-  'RPC snapshots are observations, not Ethereum state proofs; post-basis history is unknown unless the same canonical block is observed.',
+  'RPC snapshots and bounded event continuity are observations, not state/log proofs; unchanged assumes complete matching RPC logs for the configured reference implementation.',
+  'Rechecked exported observations and signer-authored times do not prove historical signature existence.',
   'A2A polling is loopback-only without HTTP authentication; this is not full A2A conformance.',
 ];
 
@@ -88,7 +92,7 @@ function unavailable(origin: string, reason: string): DiscoveryVerification {
 
 /** Re-reads chain and card with a separate client. Exported observations are evidence to compare, not authority. */
 export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: PublicClient,
-  domain: IdentityDomain, filter: ServiceFilter, allowedCardOrigin: string): Promise<JourneyReport> {
+  domain: IdentityContinuityDomain, filter: ServiceFilter, allowedCardOrigin: string): Promise<JourneyReport> {
   const reasons: string[] = [];
   const origin = evidence?.candidate?.observerOrigin ?? 'unknown';
   let task: A2ATask;
@@ -144,23 +148,32 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
   if (!sameSnapshot(basis, evidence.basisObservation)) {
     return stopped(discovery, 'authority-basis', 'exported basis observation differs from independent chain read');
   }
-  let current: AuthoritySnapshot;
-  try { current = await readIdentitySnapshot(client, evidence.candidate.agent); }
+  let exported: AuthoritySnapshot;
+  try {
+    if (!/^(0|[1-9][0-9]{0,77})$/.test(evidence.currentObservation.blockNumber)) throw new Error('invalid exported block number');
+    exported = await readIdentitySnapshot(client, evidence.candidate.agent, BigInt(evidence.currentObservation.blockNumber));
+    if (BigInt(exported.blockNumber) < requestBasisBlock) throw new Error('exported observation precedes request basis');
+  }
   catch (error) {
     return stopped(discovery, 'current-authority', `current authority read failed: ${
       error instanceof Error ? error.message : String(error)}`);
   }
-  if (!sameSnapshot(current, evidence.currentObservation)) {
+  if (!sameSnapshot(exported, evidence.currentObservation)) {
     return stopped(discovery, 'current-authority',
       'exported current observation differs from independent chain read');
   }
-  const continuity: ContinuityFinding = basis.blockNumber === current.blockNumber &&
-    basis.blockHash === current.blockHash ? 'unchanged' : 'unknown';
-  if (continuity === 'unknown') reasons.push('authority continuity is unknown after the basis block');
+  let current: AuthoritySnapshot;
+  try { current = await readIdentitySnapshot(client, evidence.candidate.agent); }
+  catch (error) { return stopped(discovery, 'current-authority', `latest authority read failed: ${String(error)}`); }
+  const continuityFinding = await readIdentityContinuity(client, { domain, agent: evidence.candidate.agent,
+    basis, current, limits: continuityLimits });
+  const continuity = continuityFinding.status;
+  if (continuity !== 'unchanged') return { ...stopped(discovery, 'authority-continuity',
+    continuityFinding.reason, continuity), authorityObservations: { exported, latest: current } };
   let basisProfile;
   try {
     basisProfile = verifyProfile({ agent: evidence.candidate.agent,
-      agentURI: evidence.candidate.agentURI, cardBytes }, basis);
+      agentURI: basis.agentURI, cardBytes }, basis);
   } catch (error) {
     return stopped(discovery, 'authority-basis', `basis profile invalid: ${
       error instanceof Error ? error.message : String(error)}`, continuity);
@@ -210,8 +223,7 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
   if (!evidence.completion) reasons.push('provider-signed completion missing');
   if (answerIssue) reasons.push(`answer bytes invalid: ${answerIssue}`);
   const firstBrokenBoundary: JourneyReport['firstBrokenBoundary'] =
-    continuity === 'unknown' ? 'authority-continuity' :
-      !finding.request.usableAtObservation ? 'interaction' :
+    !finding.request.usableAtObservation ? 'interaction' :
       !finding.acceptance?.usableAtObservation ? 'acceptance' :
         !evidence.completion ? 'interaction' :
         answerIssue || (finding.completion?.answerBinding === 'mismatched' ||
@@ -220,6 +232,7 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
             execution === 'failed' || execution === 'inconsistent' ? 'execution' : null;
   return {
     discovery,
+    authorityObservations: { exported, latest: current },
     request: finding.request,
     ...(finding.acceptance ? { acceptance: finding.acceptance } : {}),
     ...(finding.completion ? { completion: finding.completion } : {}),

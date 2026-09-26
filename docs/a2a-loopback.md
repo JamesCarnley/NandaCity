@@ -46,13 +46,20 @@ authentication and authorization as required by A2A.
 ## Authority and durability
 
 The caller cannot supply the authority result. The service receives an async
-authority probe that independently supplies the pinned verified profile, current
+authority probe receiving the decoded signed request that independently supplies the pinned verified profile, current
 verified profile, explicit continuity finding, and observation time. It probes
 before acceptance, immediately before beginning accepted work, and again before
 terminal signing. Every claimed acceptance or terminal time must be covered by
 an observation at or after that time. Missing, stale, unknown or changed
 authority fails closed. A separate owner-published runtime key signs acceptance
 and completion; the owner key is never passed to the service.
+
+The owned chain adapter first rejects requests for a different fixed service,
+then rebuilds the exact signed block's profile using retained card bytes and
+checks the signed block hash. It reads current authority separately and uses the
+[bounded reference-registry continuity reader](authority-continuity.md). A
+startup profile cannot substitute for a caller's newer basis after feedback
+publication or other unrelated blocks.
 
 The unique key is qualified service + caller + interaction ID. Before returning
 or executing work, the service atomically persists the signed acceptance and

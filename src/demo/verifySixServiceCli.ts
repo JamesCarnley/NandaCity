@@ -2,9 +2,11 @@ import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { createPublicClient, http, isAddress, type Address, type PublicClient } from 'viem';
+import { createPublicClient, http, isAddress, type Address, type Hex, type PublicClient } from 'viem';
 
-import type { IdentityDomain, ServiceFilter } from '../discovery/verifyDiscovery.js';
+import type { ServiceFilter } from '../discovery/verifyDiscovery.js';
+import type { IdentityContinuityDomain } from '../identity/continuity.js';
+import { boundedRpcFetch } from '../identity/rpcTransport.js';
 import type { AgentRef } from '../identity/verify.js';
 import { decodeEnvelope } from '../interaction/signatures.js';
 import { boston, chicago } from './registryFixture.js';
@@ -19,7 +21,7 @@ export type SixServiceVerification = {
   verified: true;
 };
 
-const usage = 'Usage: node --import tsx src/demo/verifySixServiceCli.ts --evidence /absolute/file.json --rpc-url http://127.0.0.1:PORT --card-origin http://127.0.0.1:PORT --chain-id 31337 --registry 0x...';
+const usage = 'Usage: node --import tsx src/demo/verifySixServiceCli.ts --evidence /absolute/file.json --rpc-url http://127.0.0.1:PORT --card-origin http://127.0.0.1:PORT --chain-id 31337 --registry 0x... --genesis-hash 0x... --implementation 0x... --implementation-code-hash 0x...';
 const emphases = ['food', 'culture', 'travel-value'] as const;
 
 function option(args: string[], flag: string): string {
@@ -84,7 +86,7 @@ function usable(report: JourneyReport, execution: 'completed' | 'failed'): boole
 
 /** A separate process rechecks each original envelope against caller-selected live loopback authority. */
 export async function verifySixServiceBatch(raw: unknown, client: PublicClient,
-  domain: IdentityDomain, cardOrigin: string): Promise<SixServiceVerification> {
+  domain: IdentityContinuityDomain, cardOrigin: string): Promise<SixServiceVerification> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('batch evidence must be an object');
   const batch = raw as Batch;
   if (batch.mode !== 'local-fixture' || !Array.isArray(batch.alternatives) || batch.alternatives.length !== 6 ||
@@ -162,7 +164,7 @@ export async function verifySixServiceBatch(raw: unknown, client: PublicClient,
 
 export async function runVerifySixServiceCli(args = process.argv.slice(2)): Promise<number> {
   try {
-    if (args.length !== 10) throw new Error(usage);
+    if (args.length !== 16) throw new Error(usage);
     const file = option(args, '--evidence');
     if (!isAbsolute(file)) throw new Error('evidence path must be absolute');
     const rpcOrigin = loopbackOrigin(option(args, '--rpc-url'));
@@ -173,9 +175,12 @@ export async function runVerifySixServiceCli(args = process.argv.slice(2)): Prom
     if (!isAddress(registry, { strict: true })) throw new Error('invalid registry address');
     if ((await stat(file)).size > 8 * 1024 * 1024) throw new Error('evidence file exceeds 8 MiB');
     const raw: unknown = JSON.parse(await readFile(file, 'utf8'));
-    const client = createPublicClient({ transport: http(rpcOrigin, { retryCount: 0, timeout: 5_000 }) });
+    const client = createPublicClient({ transport: http(rpcOrigin, { retryCount: 0, timeout: 5_000, fetchFn: boundedRpcFetch }) });
     const report = await verifySixServiceBatch(raw, client,
-      { chainId, registry: registry as Address }, cardOrigin);
+      { chainId, registry: registry as Address,
+        genesisHash: option(args, '--genesis-hash') as Hex,
+        knownImplementation: { address: option(args, '--implementation') as Address,
+          codeHash: option(args, '--implementation-code-hash') as Hex } }, cardOrigin);
     process.stdout.write(`${JSON.stringify(report)}\n`);
     return 0;
   } catch (error) {

@@ -87,12 +87,15 @@ test('message/send persists acceptance before work and returns verifiable A2A 0.
   const service = await startLoopbackA2AService({
     storeDirectory: directory,
     runtimeSigner: fixture.runtime,
-    observeAuthority: async () => ({
+    observeAuthority: async (request) => {
+      assert.deepEqual(request, fixture.request, 'every runtime observation must receive the decoded signed request');
+      return ({
       basisProfile: fixture.profile,
       currentProfile: fixture.profile,
       continuity: 'unchanged',
       observedAt: NOW,
-    }),
+      });
+    },
     now: () => NOW,
     execute: async (_request, context) => {
       const duringWork = await rpc(serviceUrl, 'poll-during-work', 'tasks/get', { id: context.taskId });

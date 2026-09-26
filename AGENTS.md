@@ -25,6 +25,9 @@ discovery demonstration, and pure signed-interaction format:
 - Keccak-256 commitments to exact supplied bytes; and
 - pure verification against a caller-supplied authority snapshot;
 - block-qualified reads from an explicitly configured identity registry;
+- bounded RPC-derived reference-registry continuity over subject URI/transfer
+  and global upgrade events, with explicit known-deployment provenance and RPC
+  completeness assumptions (not a log/state proof);
 - an owned, ephemeral Anvil deployment of the pinned reference registry;
 - bounded configured-origin Index search and immutable observation reads;
 - independently derived declaration/filter checks against separately obtained

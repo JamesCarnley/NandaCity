@@ -13,10 +13,13 @@ import { createPublicClient, createTestClient, createWalletClient, http, parseEt
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 import { startLoopbackA2AService, CITY_REQUEST_DATA_TYPE } from '../a2a/service.js';
+import { observeRequestAuthority } from '../a2a/authority.js';
+import type { IdentityContinuityDomain } from '../identity/continuity.js';
+import { boundRpcFetch } from '../identity/rpcTransport.js';
 import { syntheticEveningPlan } from '../a2a/answer.js';
 import { a2aTaskSchema, type A2ATask } from '../a2a/wire.js';
 import { searchIndexes } from '../discovery/indexClient.js';
-import { verifyDiscoveryWithCard, type DiscoveredCandidate, type IdentityDomain } from '../discovery/verifyDiscovery.js';
+import { verifyDiscoveryWithCard, type DiscoveredCandidate } from '../discovery/verifyDiscovery.js';
 import { readIdentitySnapshot } from '../identity/registry.js';
 import { verifyProfile, type AgentRef, type VerifiedProfile } from '../identity/verify.js';
 import { signRequest } from '../interaction/signatures.js';
@@ -24,7 +27,7 @@ import { envelopeSchema, type CityRequest } from '../interaction/schema.js';
 import { withOwnedAnvil } from './anvil.js';
 import { INDEX_SOURCE_COMMIT, withOwnedIndexes } from './indexProcesses.js';
 import { ownedFetch } from './ownedLifecycle.js';
-import { chicago, deployRegistry, published, receipt, registryAbi } from './registryFixture.js';
+import { chicago, deployRegistryWithDomain, published, receipt, registryAbi } from './registryFixture.js';
 import { fetchOwnedCard, listenOwnedServer } from './twoIndexes.js';
 import { verifyJourneyEvidence, type JourneyEvidence, type JourneyReport } from './journeyReport.js';
 
@@ -131,7 +134,7 @@ function cityMetadata(task: A2ATask): Record<string, unknown> {
 
 async function invokeAndVerify(serviceUrl: string, candidate: DiscoveredCandidate,
   cardBytes: Uint8Array, profile: VerifiedProfile, caller: ReturnType<typeof privateKeyToAccount>,
-  verifierClient: PublicClient, domain: IdentityDomain, cardOrigin: string, fail: boolean): Promise<{
+  verifierClient: PublicClient, domain: IdentityContinuityDomain, cardOrigin: string, fail: boolean): Promise<{
     evidence: JourneyEvidence; report: JourneyReport;
   }> {
   if (profile.card.url !== serviceUrl || candidate.declaration.url !== `${cardOrigin}/cards/${profile.agent.agentId}.json`) {
@@ -167,12 +170,12 @@ async function invokeAndVerify(serviceUrl: string, candidate: DiscoveredCandidat
 }
 
 async function scenario(rpcUrl: string, indexCheckout: string): Promise<Omit<ChicagoJourneyResult, 'cleanup'>> {
-  const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000, fetchFn: ownedFetch });
+  const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000, fetchFn: boundRpcFetch(ownedFetch) });
   const chain = createPublicClient({ transport, pollingInterval: 50 });
   const serviceChain = createPublicClient({ transport: http(rpcUrl, { retryCount: 0,
-    timeout: 5_000, fetchFn: ownedFetch }) });
+    timeout: 5_000, fetchFn: boundRpcFetch(ownedFetch) }) });
   const verifierClient = createPublicClient({ transport: http(rpcUrl, { retryCount: 0,
-    timeout: 5_000, fetchFn: ownedFetch }) });
+    timeout: 5_000, fetchFn: boundRpcFetch(ownedFetch) }) });
   const testClient = createTestClient({ mode: 'anvil', transport });
   const admin = privateKeyToAccount(generatePrivateKey());
   const owner = privateKeyToAccount(generatePrivateKey());
@@ -183,7 +186,8 @@ async function scenario(rpcUrl: string, indexCheckout: string): Promise<Omit<Chi
   }
   const adminWallet = createWalletClient({ account: admin, transport });
   const ownerWallet = createWalletClient({ account: owner, transport });
-  const registry = await deployRegistry(chain, adminWallet);
+  const domain = await deployRegistryWithDomain(chain, adminWallet);
+  const registry = domain.registry;
   const genesis = await chain.getBlock({ blockNumber: 0n });
   assert.ok(genesis.hash);
   let agent: AgentRef | undefined;
@@ -192,13 +196,9 @@ async function scenario(rpcUrl: string, indexCheckout: string): Promise<Omit<Chi
   const directory = await mkdtemp(join(tmpdir(), 'nandacity-journey-'));
   const service = await startLoopbackA2AService({
     storeDirectory: directory, runtimeSigner: runtime, now: utcNow,
-    observeAuthority: async () => {
+    observeAuthority: async (request) => {
       if (!agent || !frozenProfile || !cardBytes) throw new Error('owned service not yet registered');
-      const snapshot = await readIdentitySnapshot(serviceChain, agent);
-      const currentProfile = verifyProfile({ agent, agentURI: snapshot.agentURI, cardBytes }, snapshot);
-      const continuity = snapshot.blockNumber === frozenProfile.source.blockNumber &&
-        snapshot.blockHash === frozenProfile.source.blockHash ? 'unchanged' : 'unknown';
-      return { basisProfile: frozenProfile, currentProfile, continuity, observedAt: utcNow() };
+      return observeRequestAuthority(serviceChain, { domain, agent, cardBytes, now: utcNow }, request);
     },
     execute: async (request) => {
       if (request.input.preferences.includes('Trigger provider fault')) {
@@ -240,7 +240,6 @@ async function scenario(rpcUrl: string, indexCheckout: string): Promise<Omit<Chi
       const candidateA = await waitCandidate(indexes.indexes.A.origin, agentId);
       const candidateB = await waitCandidate(indexes.indexes.B.origin, agentId);
       if (candidateA.agentURI !== candidateB.agentURI) throw new Error('owned Indexes disagree on service URI');
-      const domain = { chainId: CHAIN_ID, registry };
       for (const candidate of [candidateA, candidateB]) {
         const verdict = await verifyDiscoveryWithCard(candidate, verifierClient, domain, FILTER,
           (url) => fetchOwnedCard(url, cardOrigin));
@@ -282,6 +281,8 @@ async function scenario(rpcUrl: string, indexCheckout: string): Promise<Omit<Chi
         ...(builtMode ? [] : ['--import', 'tsx']), verifierScript,
         '--evidence', evidencePath, '--rpc-url', rpcUrl, '--card-origin', cardOrigin,
         '--chain-id', String(CHAIN_ID), '--registry', registry,
+        '--genesis-hash', domain.genesisHash, '--implementation', domain.knownImplementation.address,
+        '--implementation-code-hash', domain.knownImplementation.codeHash,
       ], { cwd: cityRoot, env: { PATH: process.env['PATH'] ?? '' }, timeout: 20_000,
         maxBuffer: 2 * 1024 * 1024, encoding: 'utf8' });
       const independent = JSON.parse(stdout) as { success: JourneyReport; failure: JourneyReport };

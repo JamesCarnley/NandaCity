@@ -8,7 +8,10 @@ import { a2aTaskSchema, type A2ATask } from '../a2a/wire.js';
 import { searchIndexes } from '../discovery/indexClient.js';
 import { fetchOwnedCard } from '../discovery/cardClient.js';
 import { verifyDiscoveryAtCurrentChain, type DiscoveredCandidate,
-  type IdentityDomain, type ServiceFilter } from '../discovery/verifyDiscovery.js';
+  type ServiceFilter } from '../discovery/verifyDiscovery.js';
+import type { IdentityContinuityDomain } from '../identity/continuity.js';
+import { boundedRpcFetch } from '../identity/rpcTransport.js';
+export { boundedRpcFetch } from '../identity/rpcTransport.js';
 import { readIdentitySnapshot } from '../identity/registry.js';
 import { decodeEnvelope, signRequest } from '../interaction/signatures.js';
 import { envelopeSchema, type CityRequest, type SignedEnvelope } from '../interaction/schema.js';
@@ -21,7 +24,7 @@ export type ExternalClientConfig = {
   rpcOrigin: string;
   cardOrigin: string;
   serviceOrigins: string[];
-  domain: IdentityDomain;
+  domain: IdentityContinuityDomain;
   chosenAgentId?: string;
 };
 export type ExternalClientResult = {
@@ -38,36 +41,6 @@ export type ExternalClientResult = {
 const MAX_RPC_BYTES = 512 * 1024;
 const RPC_TIMEOUT_MS = 5_000;
 const TASK_TIMEOUT_MS = 20_000;
-
-/** Bound separately selected chain RPC reads as well as Index/card/A2A reads. */
-export const boundedRpcFetch: typeof fetch = async (input, init) => {
-  const requestSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-  const deadline = AbortSignal.timeout(RPC_TIMEOUT_MS);
-  const response = await fetch(input, { ...init, redirect: 'manual',
-    signal: requestSignal ? AbortSignal.any([requestSignal, deadline]) : deadline });
-  if (response.status >= 300 && response.status < 400) throw new Error('RPC redirect refused');
-  const declared = response.headers.get('content-length');
-  if (declared && Number(declared) > MAX_RPC_BYTES) {
-    await response.body?.cancel();
-    throw new Error('RPC response exceeds 512 KiB');
-  }
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('RPC response has no body');
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    length += value.byteLength;
-    if (length > MAX_RPC_BYTES) {
-      await reader.cancel();
-      throw new Error('RPC response exceeds 512 KiB');
-    }
-    chunks.push(value);
-  }
-  return new Response(Buffer.concat(chunks), { status: response.status, statusText: response.statusText,
-    headers: { 'content-type': response.headers.get('content-type') ?? 'application/json' } });
-};
 
 export function exactLoopbackOrigin(raw: string): string {
   const url = new URL(raw);

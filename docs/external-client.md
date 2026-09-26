@@ -11,7 +11,8 @@ npm run demo:external-client -- --index-checkout /absolute/path/to/nanda-index-v
 The parent starts six synthetic services, two actual Index processes with
 separate databases, an exact-card server and an ephemeral local registry. It
 passes the child only public configuration: the two Index origins, separately
-selected local RPC chain and registry, exact allowed card and service origins,
+selected local RPC chain and registry with genesis hash and known implementation
+address/code hash from the owned deployment, exact allowed card and service origins,
 and city. No profile, candidate, response, signed request, fixture callback or
 owner/runtime/caller key is passed. The child creates its own unfunded EOA key
 in memory, never prints that key, and signs its own off-chain request.

@@ -33,7 +33,8 @@ completion is usable evidence of a failure, not a successful service result.
 
 For a second verification, the demo writes its exported JSON to a temporary
 file and launches `src/demo/verifyJourneyCli.ts` in a separate Node process.
-That verifier takes the trusted chain ID and registry from the owned setup,
+That verifier takes the trusted chain ID, registry, genesis hash and known
+implementation address/code hash from the owned setup,
 not from an Index row; independently re-reads the exact observation block and
 the signed request's potentially later authority-basis block, plus the current
 block; re-fetches the exact card from an allowlisted origin; and uses
@@ -53,7 +54,9 @@ node --import tsx src/demo/verifyJourneyCli.ts \
   --evidence /absolute/path/journey.json \
   --rpc-url http://127.0.0.1:PORT \
   --card-origin http://127.0.0.1:PORT \
-  --chain-id 31337 --registry 0xREGISTRY_ADDRESS
+  --chain-id 31337 --registry 0xREGISTRY_ADDRESS \
+  --genesis-hash 0xGENESIS_HASH --implementation 0xIMPLEMENTATION_ADDRESS \
+  --implementation-code-hash 0xIMPLEMENTATION_CODE_HASH
 ```
 
 The RPC and card origins are required to be exact `127.0.0.1` HTTP origins.

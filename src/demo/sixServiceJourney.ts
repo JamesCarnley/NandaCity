@@ -224,6 +224,8 @@ async function verifyInSeparateProcess(fixture: SixServiceFixture,
     ...(builtMode ? [] : ['--import', 'tsx']), script,
     '--evidence', path, '--rpc-url', fixture.rpcOrigin, '--card-origin', fixture.cardOrigin,
     '--chain-id', String(fixture.domain.chainId), '--registry', fixture.domain.registry,
+    '--genesis-hash', fixture.domain.genesisHash, '--implementation', fixture.domain.knownImplementation.address,
+    '--implementation-code-hash', fixture.domain.knownImplementation.codeHash,
   ];
   const options = { cwd: cityRoot, env: { PATH: process.env['PATH'] ?? '' },
     timeout: 60_000, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8' as const };

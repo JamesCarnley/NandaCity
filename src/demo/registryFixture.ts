@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 
-import { encodeFunctionData, isAddress, parseAbi, zeroAddress, type Account, type Address, type Hash,
+import { encodeFunctionData, isAddress, keccak256, parseAbi, zeroAddress, type Account, type Address, type Hash,
   type PublicClient, type WalletClient, type Transport } from 'viem';
 
 import { encodeRegistration, digestBytes } from '../identity/profile.js';
 import { assertLocalWriteRpcUrl } from './anvil.js';
 import { compileReferenceContracts, type ContractArtifact } from './contracts.js';
+import type { IdentityContinuityDomain } from '../identity/continuity.js';
 
 export const chicago = 'https://www.wikidata.org/entity/Q1297';
 export const boston = 'https://www.wikidata.org/entity/Q100';
@@ -42,6 +43,20 @@ async function deploy(client: PublicClient, wallet: WalletClient<Transport, unde
 }
 export async function deployRegistry(client: PublicClient,
   admin: WalletClient<Transport, undefined, Account>): Promise<Address> {
+  return (await deployKnownRegistry(client, admin)).registry;
+}
+
+/** Known implementation provenance is captured only from our pinned-artifact deployment. */
+export async function deployRegistryWithDomain(client: PublicClient,
+  admin: WalletClient<Transport, undefined, Account>): Promise<IdentityContinuityDomain> {
+  const genesis = await client.getBlock({ blockNumber: 0n });
+  assert.ok(genesis.hash);
+  return { ...await deployKnownRegistry(client, admin),
+    chainId: await client.getChainId(), genesisHash: genesis.hash };
+}
+
+async function deployKnownRegistry(client: PublicClient,
+  admin: WalletClient<Transport, undefined, Account>) {
   const artifacts = compileReferenceContracts();
   const minimal = await deploy(client, admin, artifacts.minimalUups, []);
   const proxy = await deploy(client, admin, artifacts.erc1967Proxy, [minimal,
@@ -52,7 +67,10 @@ export async function deployRegistry(client: PublicClient,
     functionName: 'upgradeToAndCall', args: [implementation,
       encodeFunctionData({ abi: adminAbi, functionName: 'initialize' })], chain: null }));
   assert.equal(await client.readContract({ address: proxy, abi: adminAbi, functionName: 'getVersion' }), '2.0.0');
-  return proxy;
+  const code = await client.getCode({ address: implementation });
+  assert.ok(code && code !== '0x');
+  return { registry: proxy,
+    knownImplementation: { address: implementation, codeHash: keccak256(code) } };
 }
 
 /** This write path is only for the disposable local-chain fixture. */
