@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 
-import { encodeFunctionData, isAddress, keccak256, parseAbi, zeroAddress, type Account, type Address, type Hash,
+import { encodeAbiParameters, encodeFunctionData, isAddress, keccak256, parseAbi, parseAbiParameters, toEventSelector, zeroAddress, type Account, type Address, type Hash,
   type PublicClient, type WalletClient, type Transport } from 'viem';
 
 import { encodeRegistration, digestBytes } from '../identity/profile.js';
 import { assertLocalWriteRpcUrl } from './anvil.js';
 import { compileReferenceContracts, type ContractArtifact } from './contracts.js';
 import type { IdentityContinuityDomain } from '../identity/continuity.js';
+import type { DirectCreation, ReputationDeploymentProvenance } from '../feedback/reputationActivation.js';
 
 export const chicago = 'https://www.wikidata.org/entity/Q1297';
 export const boston = 'https://www.wikidata.org/entity/Q100';
@@ -76,6 +77,21 @@ async function deployKnownRegistry(client: PublicClient,
 /** This write path is only for the disposable local-chain fixture. */
 export async function deployReputationRegistry(client: PublicClient,
   admin: WalletClient<Transport, undefined, Account>, identityRegistry: Address): Promise<Address> {
+  return (await deployReputationFixture(client, admin, identityRegistry, false)).address;
+}
+
+/** Configured fixture provenance for a later independent read, not a verified finding. */
+export async function deployReputationRegistryWithProvenance(client: PublicClient,
+  admin: WalletClient<Transport, undefined, Account>, identityRegistry: Address):
+Promise<{ address: Address; provenance: ReputationDeploymentProvenance }> {
+  const result = await deployReputationFixture(client, admin, identityRegistry, true);
+  assert.ok(result.provenance);
+  return { address: result.address, provenance: result.provenance };
+}
+
+async function deployReputationFixture(client: PublicClient, admin: WalletClient<Transport, undefined, Account>,
+  identityRegistry: Address, captureProvenance: boolean):
+Promise<{ address: Address; provenance?: ReputationDeploymentProvenance }> {
   const publicUrl = client.transport.type === 'http' && 'url' in client.transport
     ? client.transport.url : undefined;
   const walletUrl = admin.transport.type === 'http' && 'url' in admin.transport
@@ -121,20 +137,51 @@ export async function deployReputationRegistry(client: PublicClient,
   }
 
   const artifacts = compileReferenceContracts();
-  const minimal = await deploy(client, admin, artifacts.minimalUups, []);
-  const proxy = await deploy(client, admin, artifacts.erc1967Proxy, [minimal,
+  // The legacy address helper also supports owned Anvil with a nonzero initial
+  // height. Only provenance consumers require an actual numbered block zero.
+  const genesis = captureProvenance ? await client.getBlock({ blockNumber: 0n }) : undefined;
+  if (captureProvenance) assert.ok(genesis?.hash);
+  const deployer = admin.account.address;
+  async function create(artifact: ContractArtifact, args: readonly unknown[]): Promise<DirectCreation> {
+    const mined = await receipt(client, await admin.deployContract({ abi: artifact.abi,
+      bytecode: artifact.bytecode, args, chain: null }));
+    assert.ok(mined.contractAddress);
+    const transaction = await client.getTransaction({ hash: mined.transactionHash });
+    const code = await client.getCode({ address: mined.contractAddress, blockNumber: mined.blockNumber });
+    assert.ok(code && code !== '0x');
+    return { address: mined.contractAddress, nonce: String(transaction.nonce), runtimeCodeHash: keccak256(code),
+      transactionHash: mined.transactionHash, blockNumber: mined.blockNumber.toString(), blockHash: mined.blockHash,
+      transactionIndex: mined.transactionIndex };
+  }
+  const minimal = await create(artifacts.minimalUups, []);
+  const proxy = await create(artifacts.erc1967Proxy, [minimal.address,
     encodeFunctionData({ abi: reputationAdminAbi, functionName: 'initialize',
       args: [identityRegistry] })]);
-  const implementation = await deploy(client, admin, artifacts.reputationRegistry, []);
-  await receipt(client, await admin.writeContract({ address: proxy, abi: minimalAbi,
-    functionName: 'upgradeToAndCall', args: [implementation,
+  const implementation = await create(artifacts.reputationRegistry, []);
+  const activation = await receipt(client, await admin.writeContract({ address: proxy.address, abi: minimalAbi,
+    functionName: 'upgradeToAndCall', args: [implementation.address,
       encodeFunctionData({ abi: reputationAdminAbi, functionName: 'initialize',
         args: [identityRegistry] })], chain: null }));
-  assert.equal(await client.readContract({ address: proxy, abi: reputationAdminAbi,
+  assert.equal(await client.readContract({ address: proxy.address, abi: reputationAdminAbi,
     functionName: 'getVersion' }), '2.0.0');
-  assert.equal((await client.readContract({ address: proxy, abi: reputationAdminAbi,
+  assert.equal((await client.readContract({ address: proxy.address, abi: reputationAdminAbi,
     functionName: 'getIdentityRegistry' })).toLowerCase(), identityRegistry.toLowerCase());
-  return proxy;
+  if (!captureProvenance) return { address: proxy.address };
+  assert.ok(genesis?.hash);
+  const topic = toEventSelector('Upgraded(address)');
+  const target = encodeAbiParameters(parseAbiParameters('address'), [implementation.address]);
+  const upgrades = activation.logs.filter((log) => log.address.toLowerCase() === proxy.address.toLowerCase() &&
+    log.topics.length === 2 && log.topics[0]?.toLowerCase() === topic.toLowerCase() &&
+    log.topics[1]?.toLowerCase() === target.toLowerCase() && log.data === '0x');
+  assert.equal(upgrades.length, 1);
+  const upgradedLogIndex = upgrades[0]!.logIndex;
+  assert.ok(upgradedLogIndex !== null);
+  return { address: proxy.address, provenance: {
+    domain: { chainId: 31_337, genesisHash: genesis.hash, identityRegistry, reputationRegistry: proxy.address },
+    deployer, artifacts: artifacts.provenance, bootstrap: minimal, proxy, implementation,
+    activation: { transactionHash: activation.transactionHash, blockNumber: activation.blockNumber.toString(),
+      blockHash: activation.blockHash, transactionIndex: activation.transactionIndex, upgradedLogIndex },
+  } };
 }
 
 function makeCard(record: Pick<CardRecord, 'city' | 'invocationUrl' | 'revision' | 'operatorLabel'>) {
