@@ -27,7 +27,7 @@ const alive = (pid: number): boolean => {
 export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM',
   stage: 'container-acquiring' | 'ready' | 'anvil-preflight' | 'index' | 'lost-receipt' | 'demo-ready',
   repeated = false, processGroup = false, reportCommand = false,
-  externalClientCommand = false): Promise<void> {
+  externalClientCommand = false, feedbackCommand = false): Promise<void | { observedReader: 'feedback' }> {
   const docker = execFileSync('which', ['docker'], { encoding: 'utf8' }).trim();
   const anvil = execFileSync('which', ['anvil'], { encoding: 'utf8' }).trim();
   const endpoint = execFileSync(docker, ['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'],
@@ -51,7 +51,8 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
   const sentinel = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   const reportHtml = join(directory, 'comparison.html');
   const reportEvidence = join(directory, 'original-evidence.json');
-  const childArgs = reportCommand ? ['--import', 'tsx', join(here, '../../src/cli.ts'),
+  const childArgs = feedbackCommand ? ['--import', 'tsx', join(here, '../../src/cli.ts'),
+    'feedback', 'demo', '--index-checkout', checkout] : reportCommand ? ['--import', 'tsx', join(here, '../../src/cli.ts'),
     'report', 'demo', '--index-checkout', checkout, '--html', reportHtml, '--evidence', reportEvidence] :
     externalClientCommand ? ['--import', 'tsx', join(here, '../../src/cli.ts'),
       'external-client', 'demo', '--index-checkout', checkout, '--city', 'Chicago'] :
@@ -60,6 +61,8 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
     { env: { ...process.env, PATH: `${directory}:${process.env['PATH'] ?? ''}` },
       detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let observedClientPid: number | undefined;
+  let observedBundlePath: string | undefined;
+  const clientPattern = feedbackCommand ? /(?:^|\/)verifyFeedbackCli\.(?:ts|js)(?:\s|$)/ : /(?:^|\/)externalClientCli\.(?:ts|js)(?:\s|$)/;
   let output = '';
   child.stdout.on('data', (bytes: Buffer) => { output += bytes.toString(); });
   child.stderr.on('data', (bytes: Buffer) => { output += bytes.toString(); });
@@ -70,7 +73,8 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
       for (const row of rows) {
         const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(row);
         if (match && Number(match[2]) === child.pid &&
-            /(?:^|\/)externalClientCli\.(?:ts|js)(?:\s|$)/.test(match[3]!)) {
+            clientPattern.test(match[3]!)) {
+          if (feedbackCommand) observedBundlePath = /--private-bundle (\S+)/.exec(match[3]!)?.[1];
           return Number(match[1]);
         }
       }
@@ -82,6 +86,10 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
         event.stage === (stage === 'lost-receipt' ? 'container-acquiring' : stage));
       const indexes = recorded.filter((event) => event.stage === 'index');
       if (indexes.length < 2) return false;
+      if (feedbackCommand) {
+        observedClientPid = directClientPid();
+        return observedClientPid !== undefined && observedBundlePath !== undefined;
+      }
       try {
         const healthy = (await Promise.all(indexes.slice(0, 2).map(async (event) =>
           (await fetch(`${event.origin}/health`, { signal: AbortSignal.timeout(250) })).ok))).every(Boolean);
@@ -104,7 +112,7 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
       assert.equal((await stat(reportHtml)).isFile(), true, 'report HTML was not reserved before signal');
       assert.equal((await stat(reportEvidence)).isFile(), true, 'report evidence was not reserved before signal');
     }
-    if (externalClientCommand) {
+    if (externalClientCommand || feedbackCommand) {
       assert.ok(observedClientPid && alive(observedClientPid),
         'observed child client must still be running immediately before parent interruption');
     }
@@ -116,14 +124,14 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
     while (child.exitCode === null && child.signalCode === null && Date.now() < exitDeadline) await delay(25);
     if (stage === 'lost-receipt') assert.equal(child.exitCode, 1, output);
     else assert.equal(child.signalCode, signal, `root must terminate with original signal: ${output}`);
-    if (externalClientCommand) {
+    if (externalClientCommand || feedbackCommand) {
       assert.ok(observedClientPid, 'signal probe must observe the actual child client process before interruption');
       const childExitDeadline = Date.now() + 5_000;
       while (alive(observedClientPid) && Date.now() < childExitDeadline) await delay(25);
       assert.equal(alive(observedClientPid), false, 'child client process survived parent cancellation');
     }
     const recorded = await events(log);
-    if (!reportCommand && !externalClientCommand && stage !== 'anvil-preflight' && stage !== 'demo-ready') {
+    if (!reportCommand && !externalClientCommand && !feedbackCommand && stage !== 'anvil-preflight' && stage !== 'demo-ready') {
       assert.ok(recorded.some((event) => event.stage === 'scenario-cleaned'), 'scenario finally was bypassed');
     } else if (stage === 'anvil-preflight') {
       assert.equal(recorded.some((event) => event.stage === 'anvil'), false, 'Anvil spawned after cancellation');
@@ -155,13 +163,19 @@ export async function signalProbe(checkout: string, signal: 'SIGINT' | 'SIGTERM'
       await assert.rejects(stat(reportHtml), { code: 'ENOENT' });
       await assert.rejects(stat(reportEvidence), { code: 'ENOENT' });
     }
+    if (feedbackCommand) {
+      assert.ok(observedBundlePath, 'reader must receive its separately owned private file');
+      await assert.rejects(stat(observedBundlePath), { code: 'ENOENT' });
+      await assert.rejects(stat(dirname(observedBundlePath)), { code: 'ENOENT' });
+      return { observedReader: 'feedback' };
+    }
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     if (observedClientPid && alive(observedClientPid)) {
       try {
         const command = execFileSync('ps', ['-p', String(observedClientPid), '-o', 'command='],
           { encoding: 'utf8' });
-        if (/(?:^|\/)externalClientCli\.(?:ts|js)(?:\s|$)/.test(command)) {
+        if (clientPattern.test(command)) {
           process.kill(observedClientPid, 'SIGKILL');
         }
       } catch { /* already exited */ }

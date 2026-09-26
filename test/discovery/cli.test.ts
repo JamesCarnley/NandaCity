@@ -6,6 +6,16 @@ import test from 'node:test';
 
 import { runCli } from '../../src/cli.js';
 
+test('feedback retention CLI rejects malformed arguments before allocating resources', async () => {
+  for (const args of [[], ['--index-checkout', 'relative'], ['--index-checkout', '/tmp/index', '--extra'],
+    ['--index-checkout', '/tmp/index', '--json', '--json']]) {
+    let error = '';
+    assert.equal(await runCli(['feedback', 'demo', ...args], { write: () => true },
+      { write: (value: string) => { error += value; return true; } }), 2);
+    assert.match(error, /demo:feedback.*--index-checkout.*absolute/);
+  }
+});
+
 test('discovery CLI requires an absolute Index checkout and reports usage', async () => {
   let error = '';
   const output = { write: (_value: string) => true };

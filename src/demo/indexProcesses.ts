@@ -5,11 +5,12 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { checkOwnedCancellation, withOwnedLifecycle, type OwnedLifecycle } from './ownedLifecycle.js';
+import { feedbackSourceId, type FeedbackIndexSource } from '../feedback/indexClient.js';
 
 const execFileAsync = promisify(execFile);
 export const INDEX_PUBLIC_REPOSITORY = 'https://github.com/JamesCarnley/nanda-index-v2';
 // Updated only after the reviewed public source commit is known.
-export const INDEX_SOURCE_COMMIT = '94dca70d86fcd915d8f6e46442e1e3a71ebb9ce7';
+export const INDEX_SOURCE_COMMIT = '416954077d408ab4de1e096414f004f02ee8ff10';
 const LABEL = 'org.nandacity.owned-demo';
 
 export type IdentitySourceConfig = {
@@ -20,6 +21,10 @@ export type OwnedIndex = { name: 'A' | 'B'; origin: string; database: string;
   stop: () => Promise<void> };
 export type OwnedIndexEnvironment = {
   indexes: { A: OwnedIndex; B: OwnedIndex };
+  restart: (name: 'A' | 'B') => Promise<OwnedIndex>;
+  rebuild: (name: 'A' | 'B') => Promise<OwnedIndex>;
+  stop: (name: 'A' | 'B') => Promise<void>;
+  start: (name: 'A' | 'B') => Promise<OwnedIndex>;
   restartA: () => Promise<OwnedIndex>;
   rebuildA: () => Promise<OwnedIndex>;
   stopA: () => Promise<void>;
@@ -27,6 +32,8 @@ export type OwnedIndexEnvironment = {
   containerId: string;
   lifecycle: OwnedLifecycle;
 };
+type IndexOptions = { serverExecutable?: string;
+  feedback?: Partial<Record<'A' | 'B', FeedbackIndexSource & { documentUrls: string[] }>> };
 
 function childEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   return { PATH: process.env['PATH'] ?? '', ...extra };
@@ -186,13 +193,21 @@ async function waitReady(origin: string, child: ChildProcess, sourceId: string,
 
 export async function withOwnedIndexes<T>(indexCheckout: string, source: IdentitySourceConfig,
   rpcUrls: { A: string; B: string }, run: (owned: OwnedIndexEnvironment) => Promise<T>,
-  options: { serverExecutable?: string } = {}): Promise<T> {
+  options: IndexOptions = {}): Promise<T> {
   return withOwnedLifecycle((lifecycle) => runWithOwnedIndexes(indexCheckout, source, rpcUrls, run, options, lifecycle));
 }
 
 async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySourceConfig,
   rpcUrls: { A: string; B: string }, run: (owned: OwnedIndexEnvironment) => Promise<T>,
-  options: { serverExecutable?: string }, lifecycle: OwnedLifecycle): Promise<T> {
+  options: IndexOptions, lifecycle: OwnedLifecycle): Promise<T> {
+  for (const feedback of Object.values(options.feedback ?? {})) {
+    const { documentUrls, ...domain } = feedback;
+    feedbackSourceId(domain);
+    if (domain.chainId !== source.chainId || domain.genesisHash.toLowerCase() !== source.genesisHash.toLowerCase() ||
+      domain.identityRegistry.toLowerCase() !== source.registry.toLowerCase() || !Array.isArray(documentUrls)) {
+      throw new Error('owned Index feedback/identity source mismatch');
+    }
+  }
   const docker = await resolveLocalDocker();
   lifecycle.check();
   const checkout = await assertPinnedCheckout(indexCheckout);
@@ -213,6 +228,8 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
   let b: OwnedIndex | undefined;
   let pgPort = 0;
   const processes = new Map<'A' | 'B', ChildProcess>();
+  const usedPorts = new Set<number>();
+  const busy = new Set<'A' | 'B'>();
   let closing = false;
   const pending = new Set<Promise<unknown>>();
   const active = (): void => {
@@ -250,14 +267,18 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
     await assertEphemeralData();
     active();
     const database = name === 'A' ? dbA : dbB;
-    const indexPort = await port();
+    let indexPort = await port();
+    while (usedPorts.has(indexPort)) { active(); indexPort = await port(); }
+    usedPorts.add(indexPort);
     active();
     const origin = `http://127.0.0.1:${indexPort}`;
     const env = childEnv({ NODE_ENV: 'development', PORT: String(indexPort),
       API_BASE_URL: origin, BIND_HOST: '127.0.0.1',
       DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:${pgPort}/${database}`,
       ERC8004_IDENTITY_CONFIG: JSON.stringify({ ...source, rpcUrl: rpcUrls[name], pollMs: 100,
-        maxBlockSpan: 200 }) });
+        maxBlockSpan: 200 }),
+      ...(options.feedback?.[name] ? { ERC8004_FEEDBACK_CONFIG: JSON.stringify({ ...options.feedback[name],
+        rpcUrl: `${rpcUrls[name].replace(/\/$/, '')}/`, pollMs: 100, maxBlockSpan: 128 }) } : {}) });
     await command('node', ['dist/db/migrate.js'], serverDir, env);
     active();
     const child = spawn(options.serverExecutable ?? 'node', ['dist/server.js'], { cwd: serverDir, env,
@@ -275,19 +296,26 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
     return { name, origin, database, stop: async () => {
       if (processes.get(name) !== child) return;
       await stopChild(child);
-      processes.delete(name);
+      if (processes.get(name) === child) processes.delete(name);
     } };
   }
-  async function stopA(): Promise<void> { await a?.stop(); }
-  async function startA(): Promise<OwnedIndex> { a = await start('A'); return a; }
-  async function restartA(): Promise<OwnedIndex> { active(); await stopA(); return startA(); }
-  async function rebuildA(): Promise<OwnedIndex> {
-    active();
-    await stopA();
-    await sql(`DROP DATABASE ${dbA} WITH (FORCE)`);
-    await sql(`CREATE DATABASE ${dbA}`);
-    return startA();
+  async function stopNamed(name: 'A' | 'B'): Promise<void> { await (name === 'A' ? a : b)?.stop(); }
+  async function startNamed(name: 'A' | 'B'): Promise<OwnedIndex> {
+    const index = await start(name); if (name === 'A') a = index; else b = index; return index;
   }
+  async function restartNamed(name: 'A' | 'B'): Promise<OwnedIndex> { active(); await stopNamed(name); return startNamed(name); }
+  async function rebuildNamed(name: 'A' | 'B'): Promise<OwnedIndex> {
+    active();
+    await stopNamed(name);
+    const database = name === 'A' ? dbA : dbB;
+    await sql(`DROP DATABASE ${database} WITH (FORCE)`);
+    await sql(`CREATE DATABASE ${database}`);
+    return startNamed(name);
+  }
+  const named = <R>(name: 'A' | 'B', action: (name: 'A' | 'B') => Promise<R>) => operation(async () => {
+    if ((name !== 'A' && name !== 'B') || busy.has(name)) throw new Error('owned Index lifecycle operation conflicts');
+    busy.add(name); try { return await action(name); } finally { busy.delete(name); }
+  });
 
   let result!: T;
   const runFailures: unknown[] = [];
@@ -325,8 +353,10 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
     b = await start('B');
     active();
     result = await run({ indexes: { A: a, B: b },
-      restartA: () => operation(restartA), rebuildA: () => operation(rebuildA),
-      stopA: () => operation(stopA), startA: () => operation(startA), containerId, lifecycle });
+      restart: (name) => named(name, restartNamed), rebuild: (name) => named(name, rebuildNamed),
+      stop: (name) => named(name, stopNamed), start: (name) => named(name, startNamed),
+      restartA: () => named('A', restartNamed), rebuildA: () => named('A', rebuildNamed),
+      stopA: () => named('A', stopNamed), startA: () => named('A', startNamed), containerId, lifecycle });
   } catch (error) { runFailures.push(error); }
   closing = true;
   // Even a callback that forgets to await a lifecycle operation cannot let its

@@ -62,7 +62,12 @@ discovery demonstration, and pure signed-interaction format:
 - a City-authored separate Node client process that owns an ephemeral caller key,
   discovers one of three local candidates per city through both real Indexes,
   invokes the published loopback A2A service, and exports evidence the parent
-  independently rechecks before cleanup.
+  independently rechecks before cleanup; and
+- a pure explained reputation calculator over explicit qualified inputs, not yet
+  an independently verified ranking integration; and
+- a two-Index feedback retention drill, bounded raw-evidence reader and separate
+  historical verifier, including provider loss, reorg, revocation and empty-DB
+  missing-byte evidence. Index coverage remains self-reported, not complete history.
 
 Do not describe snapshot verification as current chain truth, liveness, safety,
 trust, or endorsement. `ownerAtPublication` must remain subordinate to the
@@ -77,7 +82,7 @@ semantic quality. See [the City interaction format](docs/interaction-format.md).
 Do not broaden the local write path to a public or non-loopback RPC. The demo
 fetches AgentCards only from its own exact loopback origin/paths; arbitrary
 external card fetching is not supported. Index rows are candidates, not authority.
-Public-chain writes, deployed A2A service operation, reputation ranking, and an
+Public-chain writes, deployed A2A service operation, integrated reputation ranking, and an
 interactive UI remain outside this boundary. The static HTML report is a
 read-only artifact, not an interactive selection UI. The loopback task service implements only
 `message/send` and `tasks/get`; body signatures do not authorize polling, and
@@ -87,10 +92,11 @@ not a durable authority source; do not claim that later parties can independentl
 re-read chain history from the export alone.
 The comparison's distinct verifier process shares the same test host and owned
 chain; it does not prove independent operator custody, live city facts, or
-semantic quality. The interactive UI and reputation policy remain unbuilt.
+semantic quality. The interactive UI and independent ranking adapters remain unbuilt.
 Local feedback publication alone is not independent canonical read-back, document
 availability, historical signature ordering, service quality, or Index retention.
-Acceptance is request acceptance, not provider permission to review. Keep the
+The separate retention drill supplies bounded availability evidence, not global
+coverage or permanent storage. Acceptance is request acceptance, not provider permission to review. Keep the
 historical verifier pure. See [local feedback publication](docs/feedback-publication.md).
 
 ## Public repository hygiene

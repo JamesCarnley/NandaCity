@@ -1,5 +1,12 @@
 # NANDA City
 
+The [local feedback retention drill](docs/feedback-retention.md) exercises a real
+signed A2A failure, two separate Index databases, provider/source loss,
+separate-process historical verification, reorg, revocation and empty-database
+recovery. Run `npm run demo:feedback -- --index-checkout /absolute/path/to/nanda-index-v2`
+(add `--json` for public evidence). This is synthetic same-host, RPC-derived
+evidence, not ranking, complete history or independent-customer reputation.
+
 NANDA City provides an identity/profile foundation, a real local ERC-8004
 registry demonstration, a two-Index local discovery fixture, a signed
 request/acceptance/completion format, and an owned loopback A2A task service.
@@ -35,7 +42,7 @@ it does not fetch an AgentCard URL.
 - Docker on a local Unix socket, with the `postgres:16` image available (or
   permission to pull it), for the two-Index integration check and demo
 - A clean checkout of public `JamesCarnley/nanda-index-v2` at pinned commit
-  `94dca70d86fcd915d8f6e46442e1e3a71ebb9ce7`, with `npm ci` run in its
+  `416954077d408ab4de1e096414f004f02ee8ff10`, with `npm ci` run in its
   `server/` directory
 
 The earlier identity-only process workflow was verified on macOS and in
@@ -53,7 +60,7 @@ No paid account, hosted RPC, wallet, API key, or environment secret is needed.
 
 ```sh
 git clone https://github.com/JamesCarnley/nanda-index-v2 /absolute/path/to/nanda-index-v2
-git -C /absolute/path/to/nanda-index-v2 checkout 94dca70d86fcd915d8f6e46442e1e3a71ebb9ce7
+git -C /absolute/path/to/nanda-index-v2 checkout 416954077d408ab4de1e096414f004f02ee8ff10
 npm ci --prefix /absolute/path/to/nanda-index-v2/server
 npm ci
 export NANDA_INDEX_CHECKOUT=/absolute/path/to/nanda-index-v2

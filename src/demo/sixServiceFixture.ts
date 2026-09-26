@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createPublicClient, createTestClient, createWalletClient, http, parseEther,
-  parseEventLogs, type Address, type PublicClient } from 'viem';
+  parseEventLogs, type Address, type Hex, type PublicClient } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 import { startLoopbackA2AService, type LoopbackA2AService } from '../a2a/service.js';
@@ -21,10 +21,15 @@ import { readIdentitySnapshot } from '../identity/registry.js';
 import { verifyProfile, type AgentRef, type VerifiedProfile } from '../identity/verify.js';
 import { signRequest } from '../interaction/signatures.js';
 import type { CityRequest, SignedEnvelope } from '../interaction/schema.js';
+import { signFeedback } from '../feedback/signatures.js';
+import type { CityFeedback } from '../feedback/schema.js';
+import type { FeedbackIndexSource } from '../feedback/indexClient.js';
+import { prepareLocalFeedbackPublication, prepareLocalFeedbackRevocation, submitPreparedFeedback,
+  type FeedbackSubmissionResult, type PreparedFeedbackPublication, type PrepareLocalFeedbackPublicationInput } from './feedbackPublication.js';
 import { withOwnedAnvil } from './anvil.js';
-import { withOwnedIndexes } from './indexProcesses.js';
+import { withOwnedIndexes, type OwnedIndexEnvironment } from './indexProcesses.js';
 import { checkOwnedCancellation, ownedFetch } from './ownedLifecycle.js';
-import { boston, chicago, deployRegistryWithDomain, published, receipt, registryAbi } from './registryFixture.js';
+import { boston, chicago, deployRegistryWithDomain, deployReputationRegistry, published, receipt, registryAbi } from './registryFixture.js';
 import { fetchOwnedCard, listenOwnedServer } from './twoIndexes.js';
 
 const CHAIN_ID = 31_337;
@@ -58,7 +63,21 @@ export type SixServiceFixture = {
   cardOrigin: string; rpcOrigin: string; chain: PublicClient; domain: IdentityContinuityDomain;
   callerAddress: Address;
   signAsCaller: (request: CityRequest) => Promise<SignedEnvelope>;
+  indexes: OwnedIndexEnvironment;
+  stopProvider: (agentId: string) => Promise<void>;
+  stopCards: () => Promise<void>;
+  feedback?: {
+    /** Known pre-deployment lower bound, not exact proxy activation or completeness proof. */
+    source: FeedbackIndexSource;
+    sign: (value: CityFeedback) => Promise<SignedEnvelope>;
+    publish: (input: Omit<PrepareLocalFeedbackPublicationInput,
+      'publicClient' | 'walletClient' | 'identityRegistry' | 'reputationRegistry' | 'allowedDocumentURL'>) => Promise<FeedbackSubmissionResult>;
+    revoke: (publicationTransaction: Hex) => Promise<FeedbackSubmissionResult>;
+    savePrefix: () => Promise<{ number: string; hash: Hex }>;
+    replaceSuffixThrough: (blockNumber: string) => Promise<void>;
+  };
 };
+type FixtureOptions = { feedback?: { documentUrls: string[] } };
 
 async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -92,7 +111,7 @@ async function waitForSearches(origins: Record<IndexName, string>): Promise<
 }
 
 async function scenario<T>(rpcUrl: string, indexCheckout: string,
-  run: (fixture: SixServiceFixture) => Promise<T>): Promise<T> {
+  run: (fixture: SixServiceFixture) => Promise<T>, options: FixtureOptions): Promise<T> {
   const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000, fetchFn: boundRpcFetch(ownedFetch) });
   const chain = createPublicClient({ transport, pollingInterval: 50 });
   const verifier = createPublicClient({ transport: http(rpcUrl, { retryCount: 0,
@@ -100,6 +119,9 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
   const serviceChain = createPublicClient({ transport: http(rpcUrl, { retryCount: 0,
     timeout: 5_000, fetchFn: boundRpcFetch(ownedFetch) }) });
   const testClient = createTestClient({ mode: 'anvil', transport });
+  // Keep the random ownership marker in block zero, but real registry chronology at wall UTC.
+  await testClient.setNextBlockTimestamp({ timestamp: BigInt(Math.floor(Date.now() / 1000)) });
+  await testClient.mine({ blocks: 1 });
   const admin = privateKeyToAccount(generatePrivateKey());
   const operators = emphases.map(() => privateKeyToAccount(generatePrivateKey()));
   const caller = privateKeyToAccount(generatePrivateKey());
@@ -112,6 +134,53 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
   const registry = domain.registry;
   const genesis = await chain.getBlock({ blockNumber: 0n });
   assert.ok(genesis.hash);
+  let feedback: SixServiceFixture['feedback'];
+  if (options.feedback) {
+    const documentUrls = [...options.feedback.documentUrls];
+    const startBlock = (await chain.getBlock()).number.toString();
+    const reputationRegistry = await deployReputationRegistry(chain, adminWallet, registry);
+    await testClient.setBalance({ address: caller.address, value: parseEther('1') });
+    const walletClient = createWalletClient({ account: caller, transport });
+    const clients = { publicClient: chain, walletClient };
+    const publications = new Map<Hex, { prepared: PreparedFeedbackPublication; result: FeedbackSubmissionResult }>();
+    let snapshot: Hex | undefined;
+    feedback = {
+      source: { chainId: CHAIN_ID, genesisHash: genesis.hash, identityRegistry: registry,
+        reputationRegistry, startBlock, confirmations: 0 },
+      sign: (value) => { checkOwnedCancellation(); return signFeedback(value, caller); },
+      publish: async (input) => {
+        checkOwnedCancellation();
+        if (!documentUrls.includes(input.feedbackURI)) throw new Error('owned feedback document URL not configured');
+        const prepared = await prepareLocalFeedbackPublication({ ...input, ...clients, identityRegistry: registry,
+          reputationRegistry, allowedDocumentURL: input.feedbackURI });
+        const result = await submitPreparedFeedback({ ...clients, prepared });
+        publications.set(result.receipt.transactionHash, { prepared, result }); return result;
+      },
+      revoke: async (hash) => {
+        checkOwnedCancellation();
+        const original = publications.get(hash); if (!original) throw new Error('publication not owned by this fixture');
+        const prepared = await prepareLocalFeedbackRevocation({ ...clients, originalPublication: original.prepared,
+          publicationResult: original.result });
+        return submitPreparedFeedback({ ...clients, prepared });
+      },
+      savePrefix: async () => {
+        checkOwnedCancellation(); if (snapshot) throw new Error('owned prefix already saved');
+        snapshot = await testClient.snapshot(); const block = await chain.getBlock();
+        return { number: block.number.toString(), hash: block.hash };
+      },
+      replaceSuffixThrough: async (number) => {
+        checkOwnedCancellation();
+        if (!snapshot || !/^(0|[1-9][0-9]*)$/.test(number) || number.length > 78) throw new Error('owned reorg input invalid');
+        const through = BigInt(number); const before = await chain.getBlock();
+        if (through > before.number || before.number - through > 128n) throw new Error('owned reorg range invalid');
+        const saved = snapshot; snapshot = undefined; await testClient.revert({ id: saved });
+        const prefix = await chain.getBlock(); const count = through + 1n - prefix.number;
+        if (count < 1n || count > 128n) throw new Error('owned replacement range invalid');
+        await testClient.setNextBlockTimestamp({ timestamp: BigInt(Math.floor(Date.now() / 1000)) });
+        await testClient.mine({ blocks: Number(count), interval: 0 });
+      },
+    };
+  }
   const cards = new Map<string, Uint8Array>();
   const cardServer = createServer((request, response) => {
     const id = /^\/cards\/([0-9]+)\.json$/.exec(request.url ?? '')?.[1];
@@ -123,6 +192,13 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
   const liveServices: LoopbackA2AService[] = [];
   const directories: string[] = [];
   let cardListening = false;
+  let cardsStopped: Promise<void> | undefined;
+  const providerStops = new Map<number, Promise<void>>();
+  const stopAt = (index: number) => {
+    let stopped = providerStops.get(index);
+    if (!stopped) { stopped = liveServices[index]!.close(); providerStops.set(index, stopped); } return stopped;
+  };
+  const stopCards = () => cardsStopped ??= cardListening ? closeServer(cardServer) : Promise.resolve();
   try {
     const cardOrigin = await listenOwnedServer(cardServer);
     cardListening = true;
@@ -243,12 +319,17 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
       return run({ services, searches, indexOrigins, ownerIsolationRejected, cardOrigin,
         rpcOrigin: rpcUrl,
         chain: verifier, domain, callerAddress: caller.address,
-        signAsCaller: (request) => signRequest(request, caller) });
-    });
+        signAsCaller: (request) => signRequest(request, caller), indexes, stopCards,
+        stopProvider: (agentId) => {
+          const index = services.findIndex((service) => service.agent.agentId === agentId);
+          if (index < 0) return Promise.reject(new Error('provider not owned by this fixture')); return stopAt(index);
+        }, ...(feedback ? { feedback } : {}) });
+    }, feedback ? { feedback: { A: { ...feedback.source, documentUrls: options.feedback!.documentUrls },
+      B: { ...feedback.source, documentUrls: options.feedback!.documentUrls } } } : {});
   } finally {
     const stopped = await Promise.allSettled([
-      ...liveServices.map((service) => service.close()),
-      ...(cardListening ? [closeServer(cardServer)] : []),
+      ...liveServices.map((_service, index) => stopAt(index)),
+      ...(cardListening ? [stopCards()] : []),
     ]);
     const removed = await Promise.allSettled(directories.map((directory) =>
       rm(directory, { recursive: true, force: true })));
@@ -261,10 +342,10 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
 
 /** Owned synthetic services and actual pinned local Indexes exist only during the callback. */
 export async function withSixServiceFixture<T>(indexCheckout: string,
-  run: (fixture: SixServiceFixture) => Promise<T>): Promise<T> {
+  run: (fixture: SixServiceFixture) => Promise<T>, options: FixtureOptions = {}): Promise<T> {
   const marker = { blockNumber: 0n,
-    timestamp: BigInt(Math.floor(Date.now() / 1_000)) + BigInt(randomBytes(3).readUIntBE(0, 3)) };
-  const owned = await withOwnedAnvil((rpcUrl) => scenario(rpcUrl, indexCheckout, run),
+    timestamp: BigInt(Math.floor(Date.now() / 1_000)) - 86401n - BigInt(randomBytes(3).readUIntBE(0, 3)) };
+  const owned = await withOwnedAnvil((rpcUrl) => scenario(rpcUrl, indexCheckout, run, options),
     { genesisMarker: marker });
   return owned.value;
 }

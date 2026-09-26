@@ -38,7 +38,7 @@ function fixtureResult(): SixServiceJourneyResult {
             basisObservation: { blockNumber: '17', blockHash: `0x${'ab'.repeat(32)}` },
             observedAt: '2026-09-24T12:00:00Z' } } };
     }));
-  return { mode: 'local-fixture', indexSourceCommit: '94dca70',
+  return { mode: 'local-fixture', indexSourceCommit: '4169540',
     indexOrigins: { A: 'http://127.0.0.1:1', B: 'http://127.0.0.1:2' },
     alternatives, retry: { agent: alternatives[0]!.agent, taskId: 'task-1', sameTask: true },
     fault: { agent: alternatives[0]!.agent,

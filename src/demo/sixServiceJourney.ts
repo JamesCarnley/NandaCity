@@ -211,6 +211,15 @@ async function invoke(service: FixtureService, fixture: SixServiceFixture,
   return { verified: { evidence, report }, ...(retryResult ? { retry: retryResult } : {}) };
 }
 
+/** Owned fixture only: reuse the actual signed HTTP/task/verification path for retention drills. */
+export async function invokeOwnedFixtureFailure(fixture: SixServiceFixture): Promise<VerifiedCase & { service: FixtureService; calls: Calls }> {
+  const service = fixture.services.find((item) => item.operatorIndex === 0 && item.city === 'Chicago');
+  if (!service) throw new Error('owned fault-capable Chicago service missing');
+  const calls: Calls = { messageSend: 0, tasksGet: 0, exactRetries: 0 };
+  const result = await invoke(service, fixture, matchingCandidate(fixture, service), calls, true, false);
+  return { ...result.verified, service, calls };
+}
+
 async function verifyInSeparateProcess(fixture: SixServiceFixture,
   batch: Pick<SixServiceJourneyResult, 'mode' | 'alternatives' | 'fault'>): Promise<{
     independentProcessVerified: true; tamperRejected: true;

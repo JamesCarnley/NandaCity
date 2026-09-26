@@ -8,6 +8,7 @@ import { formatJourneyPlain } from './demo/journeyReport.js';
 import { formatComparePlain, runSixServiceJourney } from './demo/sixServiceJourney.js';
 import { writeStaticReport } from './report/writeReport.js';
 import { runExternalClientDemo } from './demo/externalClientJourney.js';
+import { runFeedbackRetentionDemo } from './demo/feedbackRetention.js';
 
 const usage = 'Usage: npm run demo:identity -- [--json]';
 const discoveryUsage = 'Usage: npm run demo:discovery -- --index-checkout /absolute/path [--json]';
@@ -52,6 +53,25 @@ export async function runCli(
   output: Pick<NodeJS.WriteStream, 'write'> = process.stdout,
   errorOutput: Pick<NodeJS.WriteStream, 'write'> = process.stderr,
 ): Promise<number> {
+  if (args[0] === 'feedback' && args[1] === 'demo') {
+    const checkout = args[3]; const json = args[4] === '--json';
+    if ((args.length !== 4 && args.length !== 5) || args[2] !== '--index-checkout' || !checkout ||
+      !isAbsolute(checkout) || (args.length === 5 && !json)) {
+      errorOutput.write('Usage: npm run demo:feedback -- --index-checkout /absolute/path [--json]\n'); return 2;
+    }
+    try {
+      const result = await runFeedbackRetentionDemo(checkout);
+      output.write(`${json ? JSON.stringify(result, null, 2) : [
+        'Synthetic feedback retention: signed failed completion, value-1 review, two separate Index databases.',
+        'Provider/cards/document origin/A stopped: separate reader verified B-retained bytes and original links.',
+        'Reorg: prefix re-adopted; suffix retained and independently observed orphaned. Revocation retained bytes.',
+        'Empty A rebuild: chain commitment/revocation available, document bytes unavailable. Owned resources stopped.',
+        'Same-host, RPC-derived evidence; Index coverage is self-reported. No ranking or independent-customer claim.',
+      ].join('\n')}\n`); return 0;
+    } catch {
+      errorOutput.write('Feedback retention demo failed; no private evidence exported.\n'); return 1;
+    }
+  }
   if (args[0] === 'external-client' && args[1] === 'demo') {
     const checkout = args[3];
     const city = args[5];
