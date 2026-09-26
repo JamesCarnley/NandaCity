@@ -6,6 +6,9 @@ separate-process historical verification, reorg, revocation and empty-database
 recovery. Run `npm run demo:feedback -- --index-checkout /absolute/path/to/nanda-index-v2`
 (add `--json` for public evidence). This is synthetic same-host, RPC-derived
 evidence, not ranking, complete history or independent-customer reputation.
+The independent [opaque registry reader](docs/registry-observation.md) authenticates
+one raw slot, including routed calls and non-text bytes, without implying City
+feedback eligibility, known implementation provenance or ranking coverage.
 
 NANDA City provides an identity/profile foundation, a real local ERC-8004
 registry demonstration, a two-Index local discovery fixture, a signed
