@@ -1,11 +1,13 @@
 # Local feedback documents and publication
 
-This is an owned, disposable **loopback HTTP, chain 31337** fixture using generated
+The writer is an owned, disposable **loopback HTTP, chain 31337** fixture using generated
 EOAs and the pinned reference Identity/Reputation 2.0.0 registries. It is not a
 public-chain publisher, a reputation policy, a document server, or an Index sync.
 No personal wallet, paid endpoint, provider permission to review, or live provider
 is involved. Acceptance establishes that the provider accepted the request; it
 does not give the provider approval over the review's sentiment.
+The separate reader accepts an explicitly configured read-only public RPC client;
+it does not broaden the local writer's permissions.
 
 ## Exact document
 
@@ -113,6 +115,72 @@ mechanism. Resubmitting the same prepared revocation recovers its original
 receipt; preparing another revocation for an already-revoked record refuses.
 Revocation marks the record; it does not erase the original document or event.
 
+## Independent numbered read-back
+
+`readFeedbackPublication` in `src/feedback/publication.ts` has no writer or signing
+dependency. It consumes an explicit public client, full registry domain, event
+coordinates, exact retained document bytes (or `null` when unavailable), and a
+required numbered observation block:
+
+```ts
+const observation = await readFeedbackPublication({
+  client,
+  domain: { chainId, identityRegistry, reputationRegistry, genesisHash },
+  eventRef: { ...result.event, feedbackURI },
+  documentBytes: document.bytes,
+  observationBlock: selectedBlockNumber, // bigint; never implicit latest
+});
+```
+
+`genesisHash` is the expected hash of block zero. `eventRef` requires decimal-string
+`blockNumber`, `blockHash`, `transactionHash`, numeric `transactionIndex` and
+`logIndex`, and the exact expected `feedbackURI`. Extra writer-result fields are
+not trusted or used. The feedback signature commits the document contents, **not
+the URI**; URI attribution comes from matching the canonical registry event to the
+caller-selected expected URI. The reader never fetches that URI or an AgentCard.
+Configure bounded timeouts/retries on the client; the reader adds no retries.
+Malformed caller coordinates/domain or a missing numbered basis throw; missing
+RPC evidence is a returned unavailable finding.
+
+The reader checks RPC chain ID and genesis, receipt success and sender,
+destination registry, exact log and its coordinates, and the event's indexed tag.
+It compares the document's agent/reviewer/domain/value/rubric/full-envelope hash
+with the event, requiring decimals `0` and empty second tag and endpoint. At the
+selected observation block it reads Reputation 2.0.0, its Identity Registry link,
+Identity 2.0.0/ERC-721, the feedback index bound, and stored value/decimals/tags/
+revocation. Owner/profile changes after publication do not erase a record.
+Both the publication and observation numbered block hashes are re-read after all
+other reads. A later call may still supersede an earlier observation after a reorg.
+These checks are RPC-derived consistency evidence, not cryptographic state proofs,
+remote bytecode attestation, finality, or independence from the RPC operator.
+
+The JSON-safe result keeps findings separate:
+
+- `publication`: `matched`, `mismatched`, `orphaned`, or `unavailable`. A known
+  projection contradiction is mismatched; a different canonical block hash at
+  the publication height is orphaned. Missing receipts/state and transport errors
+  are unavailable. A changed observation basis invalidates the whole qualification.
+- `revocation`: `active`, `revoked`, or `unknown`, specifically for the authenticated
+  event's registry tuple at the numbered observation. This can remain known with
+  a missing or mismatched supplied document; it never describes signature validity.
+  Domain/attribution failures, unavailable state, or changed block bases leave it
+  unknown. A later revoked observation does not change an earlier active one.
+- `document`: strict decoding, independently checked EOA signature and declared
+  signer/reviewer binding, plus exact Base64 bytes, full document hash, inner digest,
+  envelope and feedback when decodable. A matching byte commitment can coexist
+  with an invalid signature. No universal verified/trusted boolean is returned.
+- `source`, `observation`, `event`, `storage`, and `diagnostics`: actual numbered
+  block/hash/timestamp, transaction/log order, reviewer/index, full event projection,
+  storage and availability diagnostics. Integers that may exceed JavaScript's
+  safe range are decimal strings. Retained document findings remain available
+  when an event becomes orphaned.
+
+`claimedFeedbackTime` separately flags a feedback `createdAt` later than its
+publication block timestamp. A not-after-publication finding does not authenticate
+that claimed time. `historicalExistence` and `historicalOrdering` remain `unknown`:
+document commitment at a publication block cannot establish that acceptance
+signatures existed earlier. The pure historical verifier is unchanged.
+
 ## Deliberately separate findings
 
 Signature validity, request/acceptance linkage, original owner-published runtime
@@ -124,7 +192,7 @@ are chronology claims. Original profile reads are RPC-derived, not state proofs;
 the pure verifier still reports historical existence/ordering as unknown and
 publication/revocation as unevaluated.
 
-The writer does not publish evidence artifacts, ensure URI availability, prove
-independent customers, resist Sybils, rank services, establish economic finality,
-or retain a durable chain after the owned Anvil is stopped. Independent canonical
-read-back and two-Index retention remain separate work.
+Neither module publishes evidence artifacts, ensures URI availability, proves
+independent customers, resists Sybils, ranks services, establishes economic finality,
+or retains a durable chain after the owned Anvil is stopped. Two-Index retention,
+reorg reconciliation, and second-client replay remain separate work.

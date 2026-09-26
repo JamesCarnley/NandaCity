@@ -40,6 +40,10 @@ discovery demonstration, and pure signed-interaction format:
 - owned loopback Reputation 2.0.0 publication/revocation with exact contract
   projections, original-block profile verification, restart-safe prepared raw
   transactions, and receipt/event observations (not canonical read-back); and
+- a separate read-only publication reader checking exact document/event projection,
+  numbered-block canonicality and registry storage through a configured RPC; its
+  findings are RPC-derived, not finality or cryptographic state proofs, and do not
+  establish historical signature existence; and
 - an owned loopback A2A 0.3 JSON-RPC subset with durable `message/send` and
   `tasks/get` tasks; and
 - one synthetic Chicago Index → AgentCard → A2A journey with separately
@@ -77,7 +81,7 @@ re-read chain history from the export alone.
 The comparison's distinct verifier process shares the same test host and owned
 chain; it does not prove independent operator custody, live city facts, or
 semantic quality. The interactive UI and reputation policy remain unbuilt.
-Local feedback publication is not independent canonical read-back, document
+Local feedback publication alone is not independent canonical read-back, document
 availability, historical signature ordering, service quality, or Index retention.
 Acceptance is request acceptance, not provider permission to review. Keep the
 historical verifier pure. See [local feedback publication](docs/feedback-publication.md).
