@@ -66,6 +66,14 @@ test('bounded Safe deployment, separate payer and exact registered effect on an 
     assert.equal(deployed.account.threshold, 1);
     assert.ok(deployed.account.owners.every((o) => input.owners.includes(o)));
     assert.equal(deployed.safe, safe);
+    await t.test('stored deployment validates and recovers by exact hash after mining without signing', async () => {
+      assert.equal(typeof adapter.readSafeDeploymentEffect, 'function');
+      await adapter.validateStoredDeployment(signed, prepared, payer.address);
+      const recovered = await adapter.readSafeDeploymentEffect(client, signed, prepared, payer.address);
+      assert.equal(recovered.transactionHash, signed.transactionHash);
+      assert.equal(recovered.safe, safe);
+      assert.equal(recovered.blockHash, deployed.blockHash);
+    });
     await t.test('configuration read-back re-derives the deployment salt/address binding', async () => {
       await adapter.readSafeAccount(network, safe, prepared.account);
       await assert.rejects(adapter.readSafeAccount(network, safe, { ...prepared.account, saltNonce: '43' }), /predicted/);
@@ -115,6 +123,9 @@ test('bounded Safe deployment, separate payer and exact registered effect on an 
       const result = await adapter.executePrepared(execution);
       firstExecution ??= result;
       const effect = await adapter.readRegisteredAgentEffect(client, result, expected);
+      const reordered = { operation: 0 as const, data: registerData, value: '0' as const, to: domain.registry };
+      const reorderedEffect = await adapter.readRegisteredAgentEffect(client, result, { ...expected, call: reordered });
+      assert.equal(reorderedEffect.agentId, String(index));
       assert.equal(effect.agentId, String(index));
       assert.equal(effect.owner.toLowerCase(), safe.toLowerCase());
       assert.equal(effect.agentURI, '');

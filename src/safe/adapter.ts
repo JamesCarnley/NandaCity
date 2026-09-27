@@ -1,4 +1,5 @@
 import SafeExport, { calculateSafeTransactionHash, EthSafeSignature } from '@safe-global/protocol-kit';
+import { isDeepStrictEqual } from 'node:util';
 import type { SafeTransactionData } from '@safe-global/types-kit';
 import { createPublicClient, decodeEventLog, encodeFunctionData, getAddress, http, keccak256,
   padHex, parseAbi, parseTransaction, recoverMessageAddress, recoverTransactionAddress,
@@ -154,12 +155,17 @@ async function predictedKit(network: SafeNetworkConfig, account: SafeAccountInpu
   if (account.predictedAddress && !same(account.predictedAddress, predictedAddress)) throw new Error('Safe predicted address mismatch');
   return { kit, predictedAddress };
 }
-async function deployment(network: SafeNetworkConfig, account: SafeAccountInput): Promise<PreparedSafeDeployment> {
+async function deployment(network: SafeNetworkConfig, account: SafeAccountInput, allowDeployed = false): Promise<PreparedSafeDeployment> {
   const client = localClient(network); validateAccount(network, account); await checkNetwork(client, network);
   for (const owner of account.owners) if (hasCode(await client.getCode({ address: owner }))) throw new Error('Safe owners must be EOAs');
   const { kit, predictedAddress } = await predictedKit(network, account);
-  if (hasCode(await client.getCode({ address: predictedAddress }))) throw new Error('Safe already deployed');
-  const tx = await kit.createSafeDeploymentTransaction();
+  if (!allowDeployed && hasCode(await client.getCode({ address: predictedAddress }))) throw new Error('Safe already deployed');
+  // The SDK's createSafeDeploymentTransaction intentionally refuses an existing
+  // proxy. Its predicted initCode derives the same factory call without sending
+  // or requiring absence, so recovery can validate the original exact bytes.
+  const initCode = allowDeployed ? await kit.getInitCode() : undefined;
+  const tx = initCode ? { to: initCode.slice(0, 42), value: '0', data: `0x${initCode.slice(42)}` }
+    : await kit.createSafeDeploymentTransaction();
   if (tx.value !== '0' || !hex(tx.data) || !same(tx.to, network.contracts.safeProxyFactory.address)) throw new Error('Safe deployment transaction mismatch');
   return { version: '0.1', network, account: { ...account, predictedAddress }, predictedAddress,
     transaction: { to: getAddress(tx.to), value: '0', data: tx.data } };
@@ -171,6 +177,51 @@ async function validateDeployment(prepared: PreparedSafeDeployment): Promise<voi
   const derived = await deployment(prepared.network, prepared.account);
   if (prepared.version !== '0.1' || !same(derived.predictedAddress, prepared.predictedAddress) ||
       JSON.stringify(derived.transaction) !== JSON.stringify(prepared.transaction)) throw new Error('Safe deployment binding mismatch');
+}
+
+/** Strict, no-sign/no-send validation against separately trusted deployment configuration. */
+export async function validateStoredDeployment(input: PreparedSafeDeployment | PreparedDeploymentExecution,
+  expected: PreparedSafeDeployment, payer: Address): Promise<void> {
+  validateNetwork(expected.network); validateNetwork(input.network); requireAddress(payer);
+  const signed = 'rawTransaction' in input;
+  exactKeys(input, ['version', 'network', 'account', 'predictedAddress', 'transaction',
+    ...(signed ? ['payer', 'payerNonce', 'rawTransaction', 'transactionHash'] : [])]);
+  const derived = await deployment(expected.network, expected.account, true);
+  for (const key of ['version', 'network', 'account', 'predictedAddress', 'transaction'] as const) {
+    if (!isDeepStrictEqual(input[key], derived[key]) || !isDeepStrictEqual(expected[key], derived[key])) {
+      throw new Error('Safe stored deployment configuration mismatch');
+    }
+  }
+  if (signed) {
+    if (!same(input.payer, payer)) throw new Error('Safe configured payer mismatch');
+    await validateOuter(expected.network, derived.transaction, input, [...derived.account.owners, derived.predictedAddress], false);
+  }
+}
+
+export type ExpectedSafeCall = { network: SafeNetworkConfig; account: SafeAccountDeploymentConfig;
+  call: SafeSingleCall; payer: Address };
+/** Historical validation intentionally does not require an unconsumed nonce. */
+export async function validateStoredCall(input: PreparedSafeCall | ApprovedSafeCall | PreparedSafeExecution,
+  expected: ExpectedSafeCall, atBlock?: bigint): Promise<void> {
+  validateNetwork(expected.network); validatePrepared(input); validateCall(expected.call);
+  const approved = 'ownerSignature' in input; const signed = 'rawTransaction' in input;
+  exactKeys(input, ['version', 'network', 'safe', 'nonce', 'call', 'transactionData', 'safeTxHash',
+    ...(approved ? ['owner', 'ownerSignature', 'executionCalldata'] : []),
+    ...(signed ? ['payer', 'payerNonce', 'rawTransaction', 'transactionHash'] : [])]);
+  if (!isDeepStrictEqual(input.network, expected.network) || !same(input.safe, expected.account.predictedAddress) ||
+      !sameCall(input.call, expected.call)) throw new Error('Safe configured call mismatch');
+  const state = await readSafeAccount(expected.network, input.safe, expected.account, atBlock);
+  if (approved) await validateApproval(input, state);
+  if (signed) {
+    if (!approved || !same(input.payer, expected.payer)) throw new Error('Safe configured payer mismatch');
+    await validateOuter(expected.network, { to: input.safe, value: '0', data: input.executionCalldata }, input,
+      [...expected.account.owners, input.safe], false);
+  }
+}
+
+function sameCall(a: SafeSingleCall, b: SafeSingleCall): boolean {
+  validateCall(a); validateCall(b);
+  return same(a.to, b.to) && a.value === b.value && a.data === b.data && a.operation === b.operation;
 }
 
 function validateCall(call: SafeSingleCall): void {
@@ -361,15 +412,15 @@ export type ExpectedRegisteredAgent = {
   /** Trusted fixture deployment configuration, never candidate-supplied or TOFU. */
   domain: IdentityContinuityDomain; registryRuntimeCodeHash: Hash; call: SafeSingleCall;
 };
-/** Independently fetches exact-hash transaction/receipt and original-block effect; no supplied receipt is trusted. */
-export async function readRegisteredAgentEffect(client: PublicClient, input: PreparedSafeExecution | SafeExecution,
+/** Shared exact-hash outer/inner/canonical-block and pinned registry read-back. No nonce-based success inference. */
+export async function readSafeExecutionEffect(client: PublicClient, input: PreparedSafeExecution | SafeExecution,
   expectedInput: ExpectedRegisteredAgent) {
   const execution = clone(input); const expected = clone(expectedInput); validatePrepared(execution);
   if (clientUrl(client) !== execution.network.rpcUrl) throw new Error('Safe reader RPC mismatch');
   const { domain } = expected;
   if (domain.chainId !== execution.network.chainId || !same(domain.genesisHash, execution.network.genesisHash) ||
-      !same(expected.call.to, domain.registry) || expected.call.data !== '0x1aa3a008' ||
-      JSON.stringify(expected.call) !== JSON.stringify(execution.call)) throw new Error('Safe expected register call/domain mismatch');
+      !same(expected.call.to, domain.registry) ||
+      !sameCall(expected.call, execution.call)) throw new Error('Safe expected call/domain mismatch');
   validateCall(expected.call); requireAddress(domain.registry);
   const [receipt, transaction] = await Promise.all([
     client.getTransactionReceipt({ hash: execution.transactionHash }), client.getTransaction({ hash: execution.transactionHash }),
@@ -388,6 +439,22 @@ export async function readRegisteredAgentEffect(client: PublicClient, input: Pre
   await validateOuter(execution.network, { to: execution.safe, value: '0', data: execution.executionCalldata }, execution,
     [...state.owners, execution.safe], false);
   successfulExecution(receipt, execution.safe, execution.safeTxHash);
+  await readSafeRegistryConfiguration(client, expected, receipt.blockNumber);
+  await canonicalBlock(client, receipt.blockNumber, receipt.blockHash);
+  return { receipt, state };
+}
+
+/** Same pinned registry check at a selected numbered block, also used before new onboarding writes. */
+export async function readSafeRegistryConfiguration(client: PublicClient,
+  expected: Pick<ExpectedRegisteredAgent, 'domain' | 'registryRuntimeCodeHash'>, atBlock?: bigint): Promise<void> {
+  clientUrl(client);
+  const { domain } = expected;
+  if (await client.getChainId() !== domain.chainId || !same((await client.getBlock({ blockNumber: 0n })).hash!, domain.genesisHash)) {
+    throw new Error('Safe registry domain mismatch');
+  }
+  const blockNumber = atBlock ?? await client.getBlockNumber({ cacheTime: 0 });
+  const block = await client.getBlock({ blockNumber });
+  if (!block.hash) throw new Error('Safe registry block unavailable');
   const artifacts = compileReferenceContracts();
   const implementation = domain.knownImplementation;
   // The fixture records the deployed implementation runtime, including UUPS's
@@ -395,13 +462,22 @@ export async function readRegisteredAgentEffect(client: PublicClient, input: Pre
   if (!implementation || !hash(implementation.codeHash) ||
       !same(expected.registryRuntimeCodeHash, keccak256(artifacts.erc1967Proxy.deployedBytecode))) throw new Error('Safe registry runtime pin mismatch');
   const [proxyCode, implementationCode, slot] = await Promise.all([
-    client.getCode({ address: domain.registry, blockNumber: receipt.blockNumber }),
-    client.getCode({ address: implementation.address, blockNumber: receipt.blockNumber }),
-    client.getStorageAt({ address: domain.registry, slot: IMPLEMENTATION_SLOT, blockNumber: receipt.blockNumber }),
+    client.getCode({ address: domain.registry, blockNumber }),
+    client.getCode({ address: implementation.address, blockNumber }),
+    client.getStorageAt({ address: domain.registry, slot: IMPLEMENTATION_SLOT, blockNumber }),
   ]);
   if (!proxyCode || !same(keccak256(proxyCode), expected.registryRuntimeCodeHash) || !implementationCode ||
       !same(keccak256(implementationCode), implementation.codeHash) || !slot ||
       !same(slot, padHex(implementation.address, { size: 32 }))) throw new Error('Safe registry deployed runtime mismatch');
+  await canonicalBlock(client, blockNumber, block.hash);
+}
+
+/** Independently fetches exact-hash transaction/receipt and original-block effect; no supplied receipt is trusted. */
+export async function readRegisteredAgentEffect(client: PublicClient, input: PreparedSafeExecution | SafeExecution,
+  expectedInput: ExpectedRegisteredAgent) {
+  const execution = clone(input); const expected = clone(expectedInput); const { domain } = expected;
+  if (expected.call.data !== '0x1aa3a008') throw new Error('Safe expected register call mismatch');
+  const { receipt } = await readSafeExecutionEffect(client, execution, expected);
   const events = receipt.logs.filter((log) => same(log.address, domain.registry) &&
     log.topics[0] === toEventSelector('Registered(uint256,string,address)'));
   if (events.length !== 1) throw new Error('Safe register effect must contain one canonical Registered event');
@@ -418,6 +494,28 @@ export async function readRegisteredAgentEffect(client: PublicClient, input: Pre
   return { transactionHash: execution.transactionHash, safeTxHash: execution.safeTxHash, registry: domain.registry,
     agentId: String(agentId), owner, agentURI: uri, payment: '0' as const, blockNumber: String(receipt.blockNumber),
     blockHash: receipt.blockHash, registeredLogIndex: log.logIndex };
+}
+
+/** Exact factory transaction and canonical deployed configuration, independently read after restart. */
+export async function readSafeDeploymentEffect(client: PublicClient, input: PreparedDeploymentExecution,
+  expected: PreparedSafeDeployment, payer: Address) {
+  await validateStoredDeployment(input, expected, payer);
+  if (clientUrl(client) !== expected.network.rpcUrl) throw new Error('Safe reader RPC mismatch');
+  const [receipt, transaction] = await Promise.all([
+    client.getTransactionReceipt({ hash: input.transactionHash }), client.getTransaction({ hash: input.transactionHash }),
+  ]);
+  if (receipt.status !== 'success' || !same(receipt.transactionHash, input.transactionHash) ||
+      !same(transaction.hash, input.transactionHash) || !transaction.to || !same(transaction.to, expected.transaction.to) ||
+      !same(transaction.from, payer) || transaction.input !== expected.transaction.data || transaction.value !== 0n ||
+      transaction.nonce !== input.payerNonce || transaction.chainId !== expected.network.chainId ||
+      transaction.blockNumber !== receipt.blockNumber || !transaction.blockHash || !same(transaction.blockHash, receipt.blockHash) ||
+      !same(receipt.from, payer) || !receipt.to || !same(receipt.to, expected.transaction.to)) {
+    throw new Error('Safe deployment transaction/receipt mismatch');
+  }
+  const state = await readSafeAccount(expected.network, expected.predictedAddress, expected.account, receipt.blockNumber);
+  if (!same(state.blockHash, receipt.blockHash)) throw new Error('Safe deployment block mismatch');
+  await canonicalBlock(client, receipt.blockNumber, receipt.blockHash);
+  return { safe: state.safe, transactionHash: input.transactionHash, blockNumber: String(receipt.blockNumber), blockHash: receipt.blockHash };
 }
 export async function assertRuntimeSeparated(runtime: Address, account: { network: SafeNetworkConfig; safe: Address },
   registry?: Address, agentId?: string): Promise<void> {

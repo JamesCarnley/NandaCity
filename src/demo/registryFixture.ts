@@ -194,8 +194,8 @@ function makeCard(record: Pick<CardRecord, 'city' | 'invocationUrl' | 'revision'
     skills: [{ id: 'evening-plan', name: 'Evening Plan',
       description: 'Synthetic city evening plan.', tags: ['city'] }] };
 }
-export function published(record: CardRecord, chainId: number, registry: Address,
-  active = true, runtimeSigner?: Address): CardRecord {
+export function published<T extends Omit<CardRecord, 'owner'> & { owner: Pick<Account, 'address'> }>(record: T,
+  chainId: number, registry: Address, active = true, runtimeSigner?: Address): T {
   const cardBytes = new TextEncoder().encode(JSON.stringify(makeCard(record)));
   const agentURI = encodeRegistration({
     type: 'https://eips.ethereum.org/EIPS/eip-8004#registration-v1',
