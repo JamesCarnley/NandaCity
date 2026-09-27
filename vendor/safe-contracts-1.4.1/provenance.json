@@ -1,0 +1,314 @@
+{
+  "schemaVersion": "0.1",
+  "upstream": "https://github.com/safe-global/safe-contracts",
+  "tarballUrl": "https://registry.npmjs.org/@safe-global/safe-contracts/-/safe-contracts-1.4.1-2.tgz",
+  "archive": {
+    "package": "@safe-global/safe-contracts",
+    "version": "1.4.1-2",
+    "license": "LGPL-3.0",
+    "bytes": 845682,
+    "sha256": "aa9793c1b0c4a298b977559181e0ac5fcdc89bf0ec993a6e24d76afc51ed0713",
+    "integrity": "sha512-UFiqZOamt1lDbyQ16lpzBE8mDdzfnQ3OBftll1erLlwIrdfmhePicQqfLquvyXA8AlqPWQ3ktz1DzpC9UcN+JQ==",
+    "peer": {
+      "ethers": "5.4.0"
+    },
+    "publishedGitHead": "aa14911666deb13cdbbe37c37253a55918525437"
+  },
+  "artifacts": [
+    {
+      "path": "build/artifacts/contracts/Safe.sol/Safe.json",
+      "sha256": "c36a5e99bc3f25c2d75ac5f7920b679200b3ce617c0d26e674b1321dbc6b0bdf",
+      "bytes": 115789,
+      "contractName": "Safe",
+      "sourceName": "contracts/Safe.sol",
+      "creationBytecodeBytes": 23620,
+      "runtimeBytecodeBytes": 23579,
+      "creationBytecodeSha256": "e3c129073285546f6ac30868a902a12c0cc432a26bcb024ed0115bcd8ab9af75",
+      "runtimeTemplateSha256": "79756c276443953adde61bbc2bfa134c03b35cf45181dab9d4f9503df22f45c8",
+      "immutableReferences": {},
+      "sourceClosure": [
+        "contracts/Safe.sol",
+        "contracts/base/Executor.sol",
+        "contracts/base/FallbackManager.sol",
+        "contracts/base/GuardManager.sol",
+        "contracts/base/ModuleManager.sol",
+        "contracts/base/OwnerManager.sol",
+        "contracts/common/Enum.sol",
+        "contracts/common/NativeCurrencyPaymentFallback.sol",
+        "contracts/common/SecuredTokenTransfer.sol",
+        "contracts/common/SelfAuthorized.sol",
+        "contracts/common/SignatureDecoder.sol",
+        "contracts/common/Singleton.sol",
+        "contracts/common/StorageAccessible.sol",
+        "contracts/external/SafeMath.sol",
+        "contracts/interfaces/IERC165.sol",
+        "contracts/interfaces/ISignatureValidator.sol"
+      ],
+      "matchesPublishedBuildInfo": true
+    },
+    {
+      "path": "build/artifacts/contracts/proxies/SafeProxyFactory.sol/SafeProxyFactory.json",
+      "sha256": "f77ccb60e95345e6583216e82feb5430098679d62aa4aeda7388df3831476997",
+      "bytes": 15539,
+      "contractName": "SafeProxyFactory",
+      "sourceName": "contracts/proxies/SafeProxyFactory.sol",
+      "creationBytecodeBytes": 3086,
+      "runtimeBytecodeBytes": 3054,
+      "creationBytecodeSha256": "36644df359182337d24a81353a0e8d76704d56faf03e22c5b38e4cc7f0576e2a",
+      "runtimeTemplateSha256": "a01f78c95e8982e0dfc891d0e26ded7547d0d1d1a2d73ad5e43e157340aa24ff",
+      "immutableReferences": {},
+      "sourceClosure": [
+        "contracts/proxies/IProxyCreationCallback.sol",
+        "contracts/proxies/SafeProxy.sol",
+        "contracts/proxies/SafeProxyFactory.sol"
+      ],
+      "matchesPublishedBuildInfo": true
+    },
+    {
+      "path": "build/artifacts/contracts/proxies/SafeProxy.sol/SafeProxy.json",
+      "sha256": "b05eaeaf7278097e52a9e9b38410de2a812c23fa3622373473e73eaa19646ecd",
+      "bytes": 1850,
+      "contractName": "SafeProxy",
+      "sourceName": "contracts/proxies/SafeProxy.sol",
+      "creationBytecodeBytes": 486,
+      "runtimeBytecodeBytes": 171,
+      "creationBytecodeSha256": "cdac0e1d7a8897472ab08d29d19e028896c4feaaff65bba661c2e5e49a39bf61",
+      "runtimeTemplateSha256": "a8a0fbd3cdf49e751346664e01b529a58322a814cf8df8d85deb20e63bd6415e",
+      "immutableReferences": {},
+      "sourceClosure": [
+        "contracts/proxies/SafeProxy.sol"
+      ],
+      "matchesPublishedBuildInfo": true
+    },
+    {
+      "path": "build/artifacts/contracts/handler/CompatibilityFallbackHandler.sol/CompatibilityFallbackHandler.json",
+      "sha256": "cd4f07b0984afb35dc9699e911eff240b11599fd78e4be12be64b401e5fd57bb",
+      "bytes": 29486,
+      "contractName": "CompatibilityFallbackHandler",
+      "sourceName": "contracts/handler/CompatibilityFallbackHandler.sol",
+      "creationBytecodeBytes": 5669,
+      "runtimeBytecodeBytes": 5637,
+      "creationBytecodeSha256": "294d1609748fba6f8298163ca30f36a88c4d3b69015dc639ba8187ed17873e8a",
+      "runtimeTemplateSha256": "8143b6ff3cf48028121244d88321907a1bddc24f1a6f12db01364511e816259a",
+      "immutableReferences": {},
+      "sourceClosure": [
+        "contracts/Safe.sol",
+        "contracts/base/Executor.sol",
+        "contracts/base/FallbackManager.sol",
+        "contracts/base/GuardManager.sol",
+        "contracts/base/ModuleManager.sol",
+        "contracts/base/OwnerManager.sol",
+        "contracts/common/Enum.sol",
+        "contracts/common/NativeCurrencyPaymentFallback.sol",
+        "contracts/common/SecuredTokenTransfer.sol",
+        "contracts/common/SelfAuthorized.sol",
+        "contracts/common/SignatureDecoder.sol",
+        "contracts/common/Singleton.sol",
+        "contracts/common/StorageAccessible.sol",
+        "contracts/external/SafeMath.sol",
+        "contracts/handler/CompatibilityFallbackHandler.sol",
+        "contracts/handler/TokenCallbackHandler.sol",
+        "contracts/interfaces/ERC1155TokenReceiver.sol",
+        "contracts/interfaces/ERC721TokenReceiver.sol",
+        "contracts/interfaces/ERC777TokensRecipient.sol",
+        "contracts/interfaces/IERC165.sol",
+        "contracts/interfaces/ISignatureValidator.sol"
+      ],
+      "matchesPublishedBuildInfo": true
+    },
+    {
+      "path": "build/artifacts/contracts/libraries/MultiSend.sol/MultiSend.json",
+      "sha256": "379f3d2133eee9b8742888749dc5caf3a1f195b37cd21013bff1d00f9e806470",
+      "bytes": 3320,
+      "contractName": "MultiSend",
+      "sourceName": "contracts/libraries/MultiSend.sol",
+      "creationBytecodeBytes": 729,
+      "runtimeBytecodeBytes": 629,
+      "creationBytecodeSha256": "2201de3bf3cf560de765b320043f5d763914eea661b07050ba2a56a7905b3378",
+      "runtimeTemplateSha256": "c268ef8591d07792962e69e1e959e72ada8b24104e1c778dcea29bd75218a62c",
+      "immutableReferences": {
+        "5093": [
+          {
+            "length": 32,
+            "start": 224
+          }
+        ]
+      },
+      "sourceClosure": [
+        "contracts/libraries/MultiSend.sol"
+      ],
+      "matchesPublishedBuildInfo": true
+    },
+    {
+      "path": "build/artifacts/contracts/libraries/MultiSendCallOnly.sol/MultiSendCallOnly.json",
+      "sha256": "1cdf585a317b17e50e15c2cde9a41fa5a16b1579076a8a209005924b3cc2a8f2",
+      "bytes": 2224,
+      "contractName": "MultiSendCallOnly",
+      "sourceName": "contracts/libraries/MultiSendCallOnly.sol",
+      "creationBytecodeBytes": 442,
+      "runtimeBytecodeBytes": 410,
+      "creationBytecodeSha256": "60481b4a6efcddcca5ca757be87496f5832bc710b1695cbe73124ad254a98b2b",
+      "runtimeTemplateSha256": "184ce47fec35ba37e711aa66a41e58e65f68b882ec1100ecada1fa4173c813a5",
+      "immutableReferences": {},
+      "sourceClosure": [
+        "contracts/libraries/MultiSendCallOnly.sol"
+      ],
+      "matchesPublishedBuildInfo": true
+    }
+  ],
+  "buildInfo": {
+    "package/build/artifacts/build-info/fac0757097c452567d4b64f14075f2c2.json": {
+      "sha256": "652f67c5cd5ef0bb9e6b160b08a1c9521d8f34c6c6afffc65b0b721bdb647e96",
+      "bytes": 4459198,
+      "solcVersion": "0.7.6",
+      "solcLongVersion": "0.7.6+commit.7338295f",
+      "compilerInput": {
+        "serialization": "JSON.stringify(buildInfo.input), no trailing newline",
+        "bytes": 177646,
+        "sha256": "993b5937c36f9a479df8771febc0c2a040a00c90b83b6202652803db2bb6cc3a"
+      },
+      "settings": {
+        "optimizer": {
+          "enabled": false,
+          "runs": 200
+        },
+        "outputSelection": {
+          "*": {
+            "*": [
+              "abi",
+              "evm.bytecode",
+              "evm.deployedBytecode",
+              "evm.methodIdentifiers",
+              "metadata",
+              "devdoc",
+              "userdoc",
+              "storageLayout",
+              "evm.gasEstimates"
+            ],
+            "": [
+              "ast"
+            ]
+          }
+        },
+        "metadata": {
+          "useLiteralContent": true
+        }
+      },
+      "inputSources": [
+        "@openzeppelin/contracts/math/SafeMath.sol",
+        "@openzeppelin/contracts/proxy/Proxy.sol",
+        "@openzeppelin/contracts/proxy/UpgradeableProxy.sol",
+        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
+        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
+        "@openzeppelin/contracts/utils/Address.sol",
+        "@openzeppelin/contracts/utils/Context.sol",
+        "contracts/accessors/SimulateTxAccessor.sol",
+        "contracts/base/Executor.sol",
+        "contracts/base/FallbackManager.sol",
+        "contracts/base/GuardManager.sol",
+        "contracts/base/ModuleManager.sol",
+        "contracts/base/OwnerManager.sol",
+        "contracts/common/Enum.sol",
+        "contracts/common/NativeCurrencyPaymentFallback.sol",
+        "contracts/common/SecuredTokenTransfer.sol",
+        "contracts/common/SelfAuthorized.sol",
+        "contracts/common/SignatureDecoder.sol",
+        "contracts/common/Singleton.sol",
+        "contracts/common/StorageAccessible.sol",
+        "contracts/examples/guards/DebugTransactionGuard.sol",
+        "contracts/examples/guards/DelegateCallTransactionGuard.sol",
+        "contracts/examples/guards/OnlyOwnersGuard.sol",
+        "contracts/examples/guards/ReentrancyTransactionGuard.sol",
+        "contracts/examples/libraries/Migrate_1_3_0_to_1_2_0.sol",
+        "contracts/external/SafeMath.sol",
+        "contracts/handler/CompatibilityFallbackHandler.sol",
+        "contracts/handler/HandlerContext.sol",
+        "contracts/handler/TokenCallbackHandler.sol",
+        "contracts/interfaces/ERC1155TokenReceiver.sol",
+        "contracts/interfaces/ERC721TokenReceiver.sol",
+        "contracts/interfaces/ERC777TokensRecipient.sol",
+        "contracts/interfaces/IERC165.sol",
+        "contracts/interfaces/ISignatureValidator.sol",
+        "contracts/interfaces/ViewStorageAccessible.sol",
+        "contracts/libraries/CreateCall.sol",
+        "contracts/libraries/MultiSend.sol",
+        "contracts/libraries/MultiSendCallOnly.sol",
+        "contracts/libraries/SafeMigration.sol",
+        "contracts/libraries/SafeStorage.sol",
+        "contracts/libraries/SafeToL2Migration.sol",
+        "contracts/libraries/SafeToL2Setup.sol",
+        "contracts/libraries/SignMessageLib.sol",
+        "contracts/proxies/IProxyCreationCallback.sol",
+        "contracts/proxies/SafeProxy.sol",
+        "contracts/proxies/SafeProxyFactory.sol",
+        "contracts/Safe.sol",
+        "contracts/SafeL2.sol",
+        "contracts/test/4337/Test4337ModuleAndHandler.sol",
+        "contracts/test/ERC1155Token.sol",
+        "contracts/test/ERC20Token.sol",
+        "contracts/test/Imports.sol",
+        "contracts/test/TestHandler.sol"
+      ]
+    }
+  },
+  "license": {
+    "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+    "bytes": 7651
+  },
+  "compilerInputPath": "compiler-input.json",
+  "sourceSha256": {
+    "@openzeppelin/contracts/math/SafeMath.sol": "4a04d0a20a19e3ef1dcabae9cad9ba006430a4e7eec4d9b519db87999722c98a",
+    "@openzeppelin/contracts/proxy/Proxy.sol": "c795b86880d9694a8a8dc3fbf4cc6b268d6e35be227a890e8fefed490772d19c",
+    "@openzeppelin/contracts/proxy/UpgradeableProxy.sol": "37b919b73cc882815acbc8e803fe703536515ff6791faa43940b251a0fc164f6",
+    "@openzeppelin/contracts/token/ERC20/ERC20.sol": "eff65ebfa1cad6260b4916ce5293ed6c7231a34d2899c04227578c172990a1f8",
+    "@openzeppelin/contracts/token/ERC20/IERC20.sol": "0573c2961569aa4906845d0cd428b5b7394956170054ceeaa8f8af96cd44875c",
+    "@openzeppelin/contracts/utils/Address.sol": "11ad5e3e21434e00c4ceba1f5a977b7a68bdd7d16b849276ce4ff4495129eec7",
+    "@openzeppelin/contracts/utils/Context.sol": "9a3d1e5be0f0ace13e2d9aa1d0a1c3a6574983983ad5de94fc412f878bf7fe89",
+    "contracts/accessors/SimulateTxAccessor.sol": "9b71cbccb1ae78708d51a97e4a32c6d6f9c93ec01311e1a0c63516a8570ab01b",
+    "contracts/base/Executor.sol": "8b72e40ac996a4ed5d9ac35721fdaae5272ca545ad5e3e6b77a6b83e2f3a5805",
+    "contracts/base/FallbackManager.sol": "209c67c9557153f2ff6f9d0a82f0c570e5eec5c2bef7735f69a1c60e8aa4058b",
+    "contracts/base/GuardManager.sol": "3faa2d7ebddf3ff217767865eec31fc5b7ec6ad6f4b5abeef66fb1f0f5654dcc",
+    "contracts/base/ModuleManager.sol": "58defca0730ec1b30a34fe4539e5c4ed60c12025e7fba577cc0d4a26d12f00b2",
+    "contracts/base/OwnerManager.sol": "5ba538135072d73ddbc23cbd72e7f2e8307710b195b0741127a238569fa4df05",
+    "contracts/common/Enum.sol": "76b04cb0a85968b99472293017de4303d7532fd428d706dcded6b8e8bbd8bfc6",
+    "contracts/common/NativeCurrencyPaymentFallback.sol": "896a5812e4b9bd8a7b36329c37fb74b742d65f751ce56a633a6a9d536be163fc",
+    "contracts/common/SecuredTokenTransfer.sol": "12ee3d429a6d0804926ebe730face33c9ea5ead1f87729acb2608e405643ec14",
+    "contracts/common/SelfAuthorized.sol": "482dc006038abf8f9bbd81428519f1051e58cc3166d980ca8d60ef81f88821ca",
+    "contracts/common/SignatureDecoder.sol": "40b553435701bfef8d10975e3e1a8c4d53be2a1060db8ab870a3218e0ea6a827",
+    "contracts/common/Singleton.sol": "dd6e1eb6292caa256bcbc953a7f64ec26d3262c4b9e6893e002f0c602ec1985d",
+    "contracts/common/StorageAccessible.sol": "ad06db25e900974bba445ce033f3aa309187a4a2716148291d799beae9ec43dd",
+    "contracts/examples/guards/DebugTransactionGuard.sol": "8198fa3f831488a9adeb0fb219484b8c1d32bee470371624669c0a55b8af7ed9",
+    "contracts/examples/guards/DelegateCallTransactionGuard.sol": "5dd394bf73e3da7b7e127e4fe10ad67280404e4afa1eb6fb8a17242bb4ca03c6",
+    "contracts/examples/guards/OnlyOwnersGuard.sol": "3aa7f4523bf72bb3def7a952b1e9810e8784b01f1dba1379a102edda477d9610",
+    "contracts/examples/guards/ReentrancyTransactionGuard.sol": "2d1d056c188f3617a6702720c477f0c610f372a1bd3df36209109aadb7fc7a86",
+    "contracts/examples/libraries/Migrate_1_3_0_to_1_2_0.sol": "112532ae3c0a0c7ba8dcd43fc789781c98468a459f50d26a289df02d4aa749a9",
+    "contracts/external/SafeMath.sol": "a581315d1b6dbd8057321411b15668c85004f5cc970a61e86dc4f476bfb1d4f7",
+    "contracts/handler/CompatibilityFallbackHandler.sol": "e1f78d39731ecaebce2e41436af217db87eb41e9e2e1d576b638847d549b1047",
+    "contracts/handler/HandlerContext.sol": "0cf457c46ab9c3384ee64ae57422dbe007bd12ed99fc2fc351c909e6e547836e",
+    "contracts/handler/TokenCallbackHandler.sol": "2cb1a610c993e801696aec53159c9dda2ad3e276193f921a99c108c287836f2e",
+    "contracts/interfaces/ERC1155TokenReceiver.sol": "55d73d38e6539df4aaa350549c1d20b33828e9364fac337435f2b4e8579df3d2",
+    "contracts/interfaces/ERC721TokenReceiver.sol": "8ac300f44c9520092797fa27f9ccf4b519dd5bfabc46ab6a372e29fbfb888a88",
+    "contracts/interfaces/ERC777TokensRecipient.sol": "3bfd575aec28b870cba4c331c09af441ab16434d37f584dae412ecbbc821cf03",
+    "contracts/interfaces/IERC165.sol": "a3c2a6c79e818860d6c1f8e404e1c95cbd4aec57131882e78e94ce212e021e38",
+    "contracts/interfaces/ISignatureValidator.sol": "72e20993af263b2c5c04ef5ac0923fb425ce1bd486a5ccb53c9c62ef028668d8",
+    "contracts/interfaces/ViewStorageAccessible.sol": "d393b3bc0d4fbe3e0ace47e289c6188e4d8dde34406f58be34de17bfce96cca6",
+    "contracts/libraries/CreateCall.sol": "7e4e26f32f08296da7e94b6ba79b1277ca86108eeee6432f72aa69634951c9f1",
+    "contracts/libraries/MultiSend.sol": "4faca0e0ddc6276f81661a077f7ef1bc34f05f9568855f4a59fb40835dbbadf5",
+    "contracts/libraries/MultiSendCallOnly.sol": "2ff7f7fd09ba1967524d9bd9507cb7528253ea3d401feaf8d0428e20109f8919",
+    "contracts/libraries/SafeMigration.sol": "424b204247c71afe71f6f6154b752656de1f7b4662ecd816a4c5768ac284854f",
+    "contracts/libraries/SafeStorage.sol": "693771e89cefd30a72e15e97858fc1b270b0ec7f6298cbe8512e7f15d352e05f",
+    "contracts/libraries/SafeToL2Migration.sol": "2d90291fba03b945822925eb28f351579673e08e7c60882521ab8c57486dd9c4",
+    "contracts/libraries/SafeToL2Setup.sol": "fbf383785aafef5d479378fba433cd7ba87e99c7c5d7b137eec9b4025f326225",
+    "contracts/libraries/SignMessageLib.sol": "8e283144e7752189c4ace922b0243d188cf0e804a9e0769a67b517d26c5b4ccf",
+    "contracts/proxies/IProxyCreationCallback.sol": "459a52432cbc708fcc340d2e276030a4989c3947a251556baf5357f525121f07",
+    "contracts/proxies/SafeProxy.sol": "a32e2bb41a928cc17ac82a7240571e7ad8b8230555f711c13343584d8a4802bb",
+    "contracts/proxies/SafeProxyFactory.sol": "0bf51e2baa3945a0e975d602d85aec63f49513e4c4a159e1c538d0a5f0808889",
+    "contracts/Safe.sol": "efd3301ed5c6bf522fb3a7a43be4a27341e65dff6d1fee04f8567f304a67e365",
+    "contracts/SafeL2.sol": "8ed69cb26d132702443e006c50d7ce36bd1ea05e2274d57df61e0ec1a96be7fe",
+    "contracts/test/4337/Test4337ModuleAndHandler.sol": "0fe2482338b1e3d0eb412bd9cb77331c9829b5148df72593b8732b52def6b10f",
+    "contracts/test/ERC1155Token.sol": "5d059be7bac9429cf56ef1c4232b262725a379d020c3856572c6cfd10d5c3a96",
+    "contracts/test/ERC20Token.sol": "b647e0629bc48c55ead5aafde3be5090c5c2a4f6fa4f07f55f47c416f2ba4341",
+    "contracts/test/Imports.sol": "4ebfefe1bc387e8988d90137d2fb9c7534186de2861a09789457532592845179",
+    "contracts/test/TestHandler.sol": "c87766e8179a2401f0d80b9219fa66121429e2721dcf0e48267bb1640dcc9017"
+  }
+}
