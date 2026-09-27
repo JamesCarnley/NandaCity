@@ -1,6 +1,7 @@
-import { decodeEventLog, encodeAbiParameters, encodeEventTopics, encodeFunctionData, isAddress, keccak256,
-  numberToHex, parseAbi, parseAbiParameters, type Address, type Hex, type PublicClient } from 'viem';
+import { decodeEventLog, encodeEventTopics, encodeFunctionData, isAddress, keccak256,
+  numberToHex, parseAbi, type Address, type Hex, type PublicClient } from 'viem';
 import { decodeRegistration } from './profile.js';
+import { decodeStrictRawString } from './rawAbi.js';
 import type { AgentRef, AuthoritySnapshot } from './verify.js';
 
 /** Locked OpenZeppelin 5.4 ERC1967Utils implementation slot. */
@@ -34,8 +35,6 @@ const boundaryFunctions = parseAbi([
   'function ownerOf(uint256 tokenId) view returns (address)',
   'function tokenURI(uint256 tokenId) view returns (string)',
 ]);
-const stringParameters = parseAbiParameters('string');
-const fatalTextDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const hash = (value: unknown): value is Hex => typeof value === 'string' && /^0x[0-9a-fA-F]{64}$/.test(value);
 const quantity = (value: unknown): value is Hex => typeof value === 'string' && /^0x(?:0|[1-9a-f][0-9a-f]*)$/i.test(value);
 const uint = (value: string) => /^(0|[1-9][0-9]{0,77})$/.test(value) && BigInt(value) < 1n << 256n;
@@ -217,28 +216,6 @@ export async function readIdentityContinuity(client: PublicClient, input: {
   } catch (error) {
     return result('unknown', error instanceof Error ? error.message : 'continuity read failed');
   }
-}
-
-function decodeStrictRawString(data: unknown, maxBytes: number, label: string): string {
-  if (typeof data !== 'string' || !/^0x(?:[0-9a-f]{2})*$/i.test(data)) throw new Error(`malformed ${label} raw ABI`);
-  const rawLength = (data.length - 2) / 2;
-  if (rawLength > maxBytes) throw new Error(`${label} raw ABI exceeds byte bound`);
-  if (rawLength < 64) throw new Error(`malformed ${label} raw ABI`);
-  const bytes = Buffer.from(data.slice(2), 'hex');
-  const offset = BigInt(`0x${bytes.subarray(0, 32).toString('hex')}`);
-  const length = BigInt(`0x${bytes.subarray(32, 64).toString('hex')}`);
-  if (offset !== 32n || length > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`noncanonical ${label} raw ABI`);
-  const size = Number(length), padded = Math.ceil(size / 32) * 32;
-  if (bytes.length !== 64 + padded || bytes.subarray(64 + size).some((value) => value !== 0)) {
-    throw new Error(`noncanonical ${label} raw ABI`);
-  }
-  let value: string;
-  try { value = fatalTextDecoder.decode(bytes.subarray(64, 64 + size)); }
-  catch { throw new Error(`${label} string is not valid UTF-8`); }
-  if (encodeAbiParameters(stringParameters, [value]).toLowerCase() !== data.toLowerCase()) {
-    throw new Error(`noncanonical ${label} raw ABI`);
-  }
-  return value;
 }
 
 async function readGuardedBoundarySnapshot(client: PublicClient, input: {

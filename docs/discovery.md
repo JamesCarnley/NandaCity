@@ -80,8 +80,15 @@ deployed registry from trusted setup, never from the Index candidate. The
 workflow checks the independent RPC's chain ID, then obtains a fresh
 block-qualified snapshot before the pure check. An old record may still
 verify against an explicitly old basis, but not against changed current URI or
-ownership. Neither RPC evidence nor Index coverage is a cryptographic state
-proof, liveness check, reputation judgment, or endorsement. The demo fetches
+ownership. The shared snapshot reader obtains `tokenURI` as raw ABI at that
+numbered block, requires canonical offset, length, padding and no suffix, and
+uses fatal UTF-8 plus exact re-encoding so a leading BOM is not normalized
+away. The resulting URI remains generic registry data: empty, HTTPS, IPFS,
+Unicode, BOM-prefixed and larger opaque strings are representable without
+acquiring City eligibility; the profile verifier separately applies City's
+schema and byte limits. The caller's RPC transport remains responsible for
+response-size and timeout bounds. Neither RPC evidence nor Index coverage is a
+cryptographic state proof, liveness check, reputation judgment, or endorsement. The demo fetches
 cards only from its own precise loopback origin and `/cards/<id>.json` paths;
 production-safe external metadata transport is not implemented.
 

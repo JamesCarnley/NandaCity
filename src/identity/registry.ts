@@ -1,5 +1,6 @@
-import { isAddress, type PublicClient } from 'viem';
+import { encodeFunctionData, isAddress, numberToHex, type PublicClient } from 'viem';
 
+import { decodeStrictRawString } from './rawAbi.js';
 import type { AgentRef, AuthoritySnapshot } from './verify.js';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -79,10 +80,13 @@ export async function readIdentitySnapshot(
   if (selectedBlock.number === null || selectedBlock.hash === null) {
     throw new Error('RPC did not return a numbered block with a hash');
   }
+  if (blockNumber !== undefined && selectedBlock.number !== blockNumber) {
+    throw new Error('RPC returned a different explicit block number');
+  }
 
   const selectedNumber = selectedBlock.number;
   const selectedHash = selectedBlock.hash;
-  const [agentOwner, agentURI] = await Promise.all([
+  const [agentOwner, rawAgentURI] = await Promise.all([
     client.readContract({
       address: agent.registry,
       abi: ownerOfAbi,
@@ -90,14 +94,11 @@ export async function readIdentitySnapshot(
       args: [agentId],
       blockNumber: selectedNumber,
     }),
-    client.readContract({
-      address: agent.registry,
-      abi: tokenUriAbi,
-      functionName: 'tokenURI',
-      args: [agentId],
-      blockNumber: selectedNumber,
-    }),
+    client.request({ method: 'eth_call', params: [{ to: agent.registry,
+      data: encodeFunctionData({ abi: tokenUriAbi, functionName: 'tokenURI', args: [agentId] }) },
+    numberToHex(selectedNumber)] }),
   ]);
+  const agentURI = decodeStrictRawString(rawAgentURI, undefined, 'tokenURI');
 
   let checkedBlock;
   try {
@@ -107,7 +108,7 @@ export async function readIdentitySnapshot(
       cause: error,
     });
   }
-  if (checkedBlock.hash === null || checkedBlock.hash !== selectedHash) {
+  if (checkedBlock.number !== selectedNumber || checkedBlock.hash !== selectedHash) {
     throw new Error('reorganization detected while reading identity snapshot');
   }
 

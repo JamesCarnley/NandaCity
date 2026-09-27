@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, encodeAbiParameters, http, parseAbiParameters,
+  type PublicClient } from 'viem';
 import { verifyDiscovery, verifyDiscoveryAtCurrentChain, verifyDiscoveryWithCard,
   type DiscoveredCandidate } from '../../src/discovery/verifyDiscovery.js';
 import {
   bytesFor, newBasis, originalAgent, originalBasis, originalCandidate,
-  originalCard, originalOwner,
+  originalAgentUriDigest, originalCard, originalOwner,
 } from '../identity/fixtures.js';
 
 const chicago = 'https://www.wikidata.org/entity/Q1297';
@@ -35,6 +36,32 @@ test('accepts an exact declaration at an explicit authority basis', () => {
   const result = verifyDiscovery(candidate, originalBasis, bytesFor(originalCard), filter);
   assert.equal(result.status, 'verified');
   assert.equal(result.observerOrigin, candidate.observerOrigin);
+  assert.equal(result.status === 'verified' ? result.profile.source.agentUriDigest : undefined,
+    originalAgentUriDigest);
+});
+
+test('rejects a normalized Index URI when raw registry bytes contain a leading BOM', async () => {
+  const rawAgentURI = `\uFEFF${candidate.agentURI}`;
+  const block = {
+    number: BigInt(originalBasis.blockNumber), hash: originalBasis.blockHash,
+    timestamp: BigInt(originalBasis.blockTimestamp),
+  };
+  const client = {
+    async getChainId() { return originalAgent.chainId; },
+    async getBlock() { return block; },
+    async readContract(parameters: { functionName: string }) {
+      return parameters.functionName === 'ownerOf' ? originalOwner : candidate.agentURI;
+    },
+    async request() {
+      return encodeAbiParameters(parseAbiParameters('string'), [rawAgentURI]);
+    },
+  } as unknown as PublicClient;
+
+  const result = await verifyDiscoveryAtCurrentChain(candidate, client, trustedDomain,
+    bytesFor(originalCard), filter);
+
+  assert.equal(result.status, 'rejected');
+  assert.match(result.status === 'rejected' ? result.reason : '', /exactly match/i);
 });
 
 test('rejects every changed normalized declaration field', () => {

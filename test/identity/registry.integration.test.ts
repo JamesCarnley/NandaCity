@@ -1,17 +1,85 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createPublicClient, createTestClient, createWalletClient, http, parseAbi,
-  parseEther, zeroAddress, type Address } from 'viem';
+import { createPublicClient, createTestClient, createWalletClient, http, keccak256, parseAbi,
+  parseEther, stringToHex, zeroAddress, type Address } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 import { withOwnedAnvil } from '../../src/demo/anvil.js';
-import { deployRegistry, deployReputationRegistry } from '../../src/demo/registryFixture.js';
+import { deployRegistry, deployReputationRegistry, published, receipt,
+  registryAbi } from '../../src/demo/registryFixture.js';
+import { verifyDiscovery, type DiscoveredCandidate } from '../../src/discovery/verifyDiscovery.js';
+import { readIdentitySnapshot } from '../../src/identity/registry.js';
 
 const reputationAbi = parseAbi([
   'function getVersion() view returns (string)',
   'function getIdentityRegistry() view returns (address)',
 ]);
+
+test('owned registry exact URI bytes reject a normalized discovery substitute',
+  { timeout: 90_000 }, async () => {
+    await withOwnedAnvil(async (rpcUrl) => {
+      const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000 });
+      const client = createPublicClient({ transport, pollingInterval: 25 });
+      const control = createTestClient({ mode: 'anvil', transport });
+      const owner = privateKeyToAccount(generatePrivateKey());
+      await control.setBalance({ address: owner.address, value: parseEther('100') });
+      const wallet = createWalletClient({ account: owner, transport });
+      const registry = await deployRegistry(client, wallet);
+      await receipt(client, await wallet.writeContract({ address: registry, abi: registryAbi,
+        functionName: 'register', chain: null }));
+      const agent = { chainId: 31_337, registry, agentId: '0' };
+      const record = published({ agentId: '0', owner, city: 'Chicago', revision: 1,
+        cardUrl: 'http://127.0.0.1:39001/card', invocationUrl: 'http://127.0.0.1:39001/a2a',
+        cardBytes: new Uint8Array(), agentURI: '' }, agent.chainId, registry);
+      const writeURI = async (agentURI: string) => receipt(client,
+        await wallet.writeContract({ address: registry, abi: registryAbi,
+          functionName: 'setAgentURI', args: [0n, agentURI], chain: null }));
+      const exactAgentURI = `\uFEFF${record.agentURI}`;
+      const publication = await writeURI(exactAgentURI);
+      const header = await client.getBlock({ blockNumber: publication.blockNumber });
+      const snapshot = await readIdentitySnapshot(client, agent, publication.blockNumber);
+      const candidate: DiscoveredCandidate = {
+        observerOrigin: 'http://127.0.0.1:39002', agent, agentURI: record.agentURI,
+        declaration: {
+          identifier: `eip155:31337/erc721:${registry}/0`,
+          displayName: 'Operator 0 Chicago Planner', type: 'application/agent-card+json',
+          url: record.cardUrl, description: 'Synthetic Chicago service from a simulated operator.',
+          capabilityIds: ['urn:nandacity:capability:evening-plan:0.1'],
+          areaServed: ['https://www.wikidata.org/entity/Q1297'],
+          interfaces: ['application/a2a+json;version=0.3'],
+        },
+        observationBlock: { number: publication.blockNumber.toString(), hash: publication.blockHash,
+          timestamp: Number(header.timestamp) },
+      };
+
+      const result = verifyDiscovery(candidate, snapshot, record.cardBytes,
+        { areaServed: ['https://www.wikidata.org/entity/Q1297'] });
+
+      assert.equal(result.status, 'rejected');
+      assert.match(result.status === 'rejected' ? result.reason : '', /exactly match/i);
+      assert.equal(snapshot.agentURI, exactAgentURI);
+
+      const ordinaryPublication = await writeURI(record.agentURI);
+      const ordinaryHeader = await client.getBlock({ blockNumber: ordinaryPublication.blockNumber });
+      const ordinarySnapshot = await readIdentitySnapshot(client, agent, ordinaryPublication.blockNumber);
+      const ordinary = verifyDiscovery({ ...candidate, observationBlock: {
+        number: ordinaryPublication.blockNumber.toString(), hash: ordinaryPublication.blockHash,
+        timestamp: Number(ordinaryHeader.timestamp),
+      } }, ordinarySnapshot, record.cardBytes,
+      { areaServed: ['https://www.wikidata.org/entity/Q1297'] });
+      assert.equal(ordinary.status, 'verified');
+      assert.equal(ordinary.status === 'verified' ? ordinary.profile.source.agentUriDigest : undefined,
+        keccak256(stringToHex(record.agentURI)));
+
+      for (const opaqueURI of ['', 'https://opaque.example/agent',
+        'ipfs://bafybeigdyrzt/agent.json', 'https://opaque.example/\u6771\u4eac/\uD83C\uDF06']) {
+        const opaquePublication = await writeURI(opaqueURI);
+        assert.equal((await readIdentitySnapshot(client, agent, opaquePublication.blockNumber)).agentURI,
+          opaqueURI);
+      }
+    });
+  });
 
 test('deploys the pinned local Reputation proxy linked to the selected Identity Registry', async () => {
   await withOwnedAnvil(async (rpcUrl) => {
