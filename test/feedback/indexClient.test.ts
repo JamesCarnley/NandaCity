@@ -272,3 +272,72 @@ test('proxy environment does not redirect the explicitly selected loopback trans
     await server(async (origin) => assert.deepEqual(Buffer.from((await readIndexFeedback({ origin, ...selected })).documentBytes!), blob));
   } finally { keys.forEach((key, i) => { if (saved[i] === undefined) delete process.env[key]; else process.env[key] = saved[i]; }); }
 });
+
+test('extracted history retains a validated page before rejecting only its continuation cursor', async () => {
+  const api = await import('../../src/feedback/indexClient.js');
+  assert.equal(typeof (api as any).readIndexFeedbackHistory, 'function');
+  for (const badCursor of [42, 'x'.repeat(4097), 'not-a-cursor']) await server(async (origin) => {
+    const result = await (api as any).readIndexFeedbackHistory({ origin, ...selected });
+    assert.equal(result.status, 'partial');
+    assert.deepEqual(result.history.map((e: any) => e.eventId), [eventId]);
+    assert.equal(result.historyPages.length, 1);
+    assert.deepEqual(result.historyPages[0].basis, history.basis);
+    await assert.rejects(readIndexFeedback({ origin, ...selected }), /cursor/);
+  }, (path, res) => {
+    if (!path.includes('/agents/')) return false;
+    res.end(JSON.stringify({ ...history, nextCursor: badCursor })); return true;
+  });
+});
+
+test('extracted history commits no rows from a malformed or generation-drifted later page', async () => {
+  const api = await import('../../src/feedback/indexClient.js');
+  assert.equal(typeof (api as any).readIndexFeedbackHistory, 'function');
+  for (const drift of [false, true]) {
+    let page = 0;
+    await server(async (origin) => {
+      const result = await (api as any).readIndexFeedbackHistory({ origin, ...selected });
+      assert.equal(result.status, 'partial');
+      assert.deepEqual(result.history.map((e: any) => e.eventId), [eventId]);
+      assert.equal(result.historyPages.length, 1);
+    }, (path, res) => {
+      if (!path.includes('/agents/')) return false;
+      const second = page++ > 0;
+      const invalid = nextEvent(2); invalid.decoded.value = '999';
+      res.end(JSON.stringify({ ...history, coverage: { ...coverage, generation: second && drift ? '1' : '0' },
+        basis: { ...history.basis, insertionSequence: '1001' },
+        items: second ? [nextEvent(1), ...(drift ? [] : [invalid])] : [event],
+        nextCursor: second ? null : cursorFor(event) })); return true;
+    });
+  }
+});
+
+test('hash-only document retrieval does not acquire history and unavailable history has no invented coverage', async () => {
+  const api = await import('../../src/feedback/indexClient.js');
+  assert.equal(typeof (api as any).readIndexFeedbackDocument, 'function');
+  const calls: string[] = [];
+  await server(async (origin) => {
+    assert.deepEqual(Buffer.from(await (api as any).readIndexFeedbackDocument({ origin, documentHash: hash })), blob);
+    assert.deepEqual(calls, [`/api/ard/feedback/documents/${hash}`]);
+    const result = await (api as any).readIndexFeedbackHistory({ origin, ...selected });
+    assert.equal(result.status, 'unavailable');
+    assert.equal(result.coverage, null);
+    assert.deepEqual(result.historyPages, []);
+  }, (path, res) => { calls.push(path); if (path.includes('/documents/')) return false; res.statusCode = 503; res.end('{}'); return true; });
+});
+
+test('selected wrapper keeps one legacy byte allowance across history, direct event and document helpers', async () => {
+  let pages = 0;
+  await server(async (origin) => {
+    await assert.rejects(readIndexFeedback({ origin, ...selected }), /body budget/);
+  }, (path, res) => {
+    if (path.includes('/documents/')) return false;
+    if (path.includes('/agents/')) {
+      const e = pages++ === 0 ? event : nextEvent(pages);
+      res.end(JSON.stringify({ ...history, basis: { ...history.basis, insertionSequence: '1001' }, items: [e],
+        nextCursor: pages < 3 ? cursorFor(e) : null }).padEnd(2097152));
+    } else if (path.includes('/events/')) res.end(JSON.stringify({ coverage, item: event, semantics: 'not-evaluated' }).padEnd(1024));
+    else res.end(JSON.stringify({ coverage, retention: { scope: 'canonical-prefix', newFeedbackEvents: '1',
+      retained: '1', pending: '0', blocked: '0' }, semantics: 'not-evaluated' }).padEnd(2097152 - 512));
+    return true;
+  });
+});
