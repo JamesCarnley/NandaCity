@@ -5,6 +5,29 @@ import test from 'node:test';
 import * as client from '../../src/client/externalClient.js';
 import type { A2ATask } from '../../src/a2a/wire.js';
 
+test('caller abort settles a physically stalled A2A body for send and polling', { timeout: 3000 }, async () => {
+  for (const polling of [false, true]) {
+    let entered!: () => void; let closed!: () => void;
+    const arrived = new Promise<void>((resolve) => { entered = resolve; });
+    const settled = new Promise<void>((resolve) => { closed = resolve; });
+    const server = createServer((_request, response) => {
+      response.on('close', closed);
+      response.writeHead(200, { 'content-type': 'application/json' }); response.write('{'); entered();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); assert.ok(address && typeof address !== 'string');
+    const abort = new AbortController();
+    const url = `http://127.0.0.1:${address.port}/`;
+    // The fifth optional argument must cancel both fetch and its streaming body.
+    const pending = polling ? client.pollTerminalTask(url, 'task', 2000, 'fixture', abort.signal) :
+      client.rpcTask(url, 'message/send', {}, 2000, abort.signal);
+    try {
+      await arrived; abort.abort(new Error('session reset'));
+      await assert.rejects(pending, /session reset/); await settled;
+    } finally { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
+  }
+});
+
 test('client chain RPC fetch refuses redirects and oversized responses', async () => {
   const boundedRpcFetch = (client as unknown as { boundedRpcFetch?: typeof fetch }).boundedRpcFetch;
   assert.ok(boundedRpcFetch, 'client exposes bounded chain RPC fetch');

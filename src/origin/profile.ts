@@ -7,7 +7,7 @@ import { verifyOriginSignature } from './signatures.js';
 import { z } from 'zod';
 import { ownedIndexOrigin, readIndexBytes } from './archive.js';
 
-export type OriginReadOptions = { allowedUrls: readonly string[]; ca: string; timeoutMs?: number };
+export type OriginReadOptions = { allowedUrls: readonly string[]; ca: string; timeoutMs?: number; signal?: AbortSignal };
 function ownedUrl(url: string, options: OriginReadOptions): URL {
   originUrlSchema.parse(url);
   const parsed = new URL(url);
@@ -16,12 +16,14 @@ function ownedUrl(url: string, options: OriginReadOptions): URL {
 }
 /** Only administrator-allowlisted exact literal-loopback HTTPS URLs. No redirect or global trust override. */
 export async function readOriginBytes(url: string, options: OriginReadOptions, maxBytes: number): Promise<Uint8Array> {
+  options.signal?.throwIfAborted();
   const parsed = ownedUrl(url, options);
   const timeoutMs = options.timeoutMs ?? 5000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5000 ||
     !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 65536 || !options.ca) throw new Error('invalid bounded origin read');
   return new Promise((resolve, reject) => {
-    const req = request(parsed, { method: 'GET', ca: options.ca, agent: false, rejectUnauthorized: true }, (res) => {
+    const req = request(parsed, { method: 'GET', ca: options.ca, agent: false, rejectUnauthorized: true,
+      ...(options.signal ? { signal: options.signal } : {}) }, (res) => {
       if (res.statusCode !== 200 || (res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity')) {
         res.destroy(); reject(new Error('origin read status or encoding refused')); return;
       }
@@ -70,6 +72,7 @@ export async function observeOriginProfile(options: ObserveOriginProfileOptions)
     return { current: 'observed', profile, observedAt, historicalAuthority: 'not-independently-proven',
       ...(card && cardBytes ? { card, cardBytes } : {}) };
   } catch {
+    options.signal?.throwIfAborted();
     return { current: 'unknown', observedAt: options.now(), historicalAuthority: 'not-independently-proven', reason: 'origin-observation-unavailable' };
   }
 }
@@ -85,14 +88,15 @@ const pointerResponse = z.strictObject({ items: z.array(z.unknown()).max(100), o
     upstreamSearch: z.literal('not-attempted'), paginationConsistency: z.literal('live-keyset'),
     readAt: z.string().max(64), identitySources: z.array(z.unknown()).max(32) }) });
 /** Organization rows are untrusted pointers only; ERC8004 discovery remains separate and strict. */
-export async function searchOriginPointers(indexOrigin: string) {
+export async function searchOriginPointers(indexOrigin: string, signal?: AbortSignal) {
   const origin = ownedIndexOrigin(indexOrigin);
   const pointers: { identityUrl: string; observerOrigin: string; authority: 'untrusted-organization-pointer' }[] = [];
   const errors: string[] = [], tokens = new Set<string>(); let token: string | null = null, complete = false;
   for (let page = 0; page < 10; page++) {
+    signal?.throwIfAborted();
     try {
       const bytes = await readIndexBytes(`${origin}/api/ard/services/search`, 2 * 1024 * 1024, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+        method: 'POST', ...(signal ? { signal } : {}), headers: { 'content-type': 'application/json' }, body: JSON.stringify({
           filter: { capabilityIds: ['urn:nandacity:capability:evening-plan:0.1'], areaServed: ['Chicago'], interfaces: ['A2A'] },
           pageSize: 100, ...(token ? { pageToken: token } : {}) }) });
       const body = pointerResponse.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
@@ -108,7 +112,7 @@ export async function searchOriginPointers(indexOrigin: string) {
       if (!body.pageToken) { complete = true; break; }
       if (tokens.has(body.pageToken)) throw new Error('repeated cursor');
       token = body.pageToken; tokens.add(token);
-    } catch { errors.push('search-incomplete'); break; }
+    } catch { signal?.throwIfAborted(); errors.push('search-incomplete'); break; }
   }
   if (!complete && !errors.includes('search-incomplete')) errors.push('search-incomplete');
   return { pointers, complete, errors };

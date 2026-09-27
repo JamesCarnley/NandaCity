@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { createPublicClient, http, type Address } from 'viem';
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
@@ -44,7 +45,9 @@ export type ExternalClientResult = {
   childVerified: true;
 };
 export type RetainedJourney = { retention: LicensedRetention; evidence: JourneyEvidence; report: JourneyReport;
-  earlierByteCheck?: EarlierByteCheck; content: () => ContentFinding; close: () => void };
+  earlierByteCheck?: EarlierByteCheck; content: () => ContentFinding;
+  /** Server-only disposable byte copy. Never serialize or cache this capability's result. */
+  readContent: () => Uint8Array | undefined; close: () => void };
 export type LicensedExternalClientResult = Omit<ExternalClientResult, 'childVerified' | 'evidence' | 'report'> & RetainedJourney & {
   mode: 'licensed-receipts-only'; childVerified: false;
 };
@@ -66,10 +69,14 @@ export async function retainLicensedJourney(evidence: JourneyEvidence, configure
     const encoded = evidence.answerBase64 ?? evidence.task.artifacts?.[0]?.parts[0]?.data.answerBase64;
     if (encoded !== undefined && contentFinding(retention, now()).contentAvailability !== 'expired') {
       if (typeof encoded !== 'string' || encoded.length > Math.ceil(256 * 1024 / 3) * 4 ||
-          !encoded.length || Buffer.from(encoded, 'base64').toString('base64') !== encoded) throw new Error('invalid transient answer encoding');
-      const nested = evidence.task.artifacts?.[0]?.parts[0]?.data.answerBase64;
-      if (nested !== undefined && nested !== encoded) throw new Error('transient answer copies disagree');
-      holder.put(taskId, Buffer.from(encoded, 'base64'), retention);
+          !encoded.length) throw new Error('invalid transient answer encoding');
+      const decoded = Buffer.from(encoded, 'base64');
+      try {
+        if (decoded.toString('base64') !== encoded) throw new Error('invalid transient answer encoding');
+        const nested = evidence.task.artifacts?.[0]?.parts[0]?.data.answerBase64;
+        if (nested !== undefined && nested !== encoded) throw new Error('transient answer copies disagree');
+        holder.put(taskId, decoded, retention);
+      } finally { decoded.fill(0); }
     }
     let earlierByteCheck: EarlierByteCheck | undefined;
     const bytes = holder.read(taskId);
@@ -83,7 +90,8 @@ export async function retainLicensedJourney(evidence: JourneyEvidence, configure
     const report = await verify(safe, undefined, retention);
     return { retention, evidence: safe, report,
       ...(earlierByteCheck ? { earlierByteCheck } : {}),
-      content: () => contentFinding(retention, now(), holder.has(taskId)), close: () => holder.close() };
+      content: () => contentFinding(retention, now(), holder.has(taskId)),
+      readContent: () => holder.read(taskId), close: () => holder.close() };
   } catch (error) { holder.close(); throw error; }
 }
 
@@ -135,29 +143,35 @@ async function boundedJson(response: Response): Promise<unknown> {
   if (!reader) throw new Error('A2A response has no body');
   const chunks: Uint8Array[] = [];
   let length = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    length += value.byteLength;
-    if (length > MAX_RPC_BYTES) { await reader.cancel(); throw new Error('A2A response exceeds 512 KiB'); }
-    chunks.push(value);
-  }
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > MAX_RPC_BYTES) throw new Error('A2A response exceeds 512 KiB');
+      chunks.push(value);
+    }
+  } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; }
   catch { throw new Error('A2A response is not JSON'); }
 }
 
 /** Bounded JSON-RPC task read for an already allowlisted service URL. */
 export async function rpcTask(url: string, method: 'message/send' | 'tasks/get', params: unknown,
-  timeoutMs = RPC_TIMEOUT_MS): Promise<A2ATask> {
+  timeoutMs = RPC_TIMEOUT_MS, signal?: AbortSignal): Promise<A2ATask> {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > RPC_TIMEOUT_MS) {
     throw new Error('invalid A2A request deadline');
   }
   const id = randomUUID();
+  signal?.throwIfAborted();
   const response = await fetch(url, { method: 'POST', redirect: 'manual',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
-    signal: AbortSignal.timeout(timeoutMs) });
-  const raw = await boundedJson(response);
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) });
+  let raw: unknown;
+  try { raw = await boundedJson(response); }
+  catch (error) { signal?.throwIfAborted(); throw error; }
+  finally { if (!response.body?.locked) await response.body?.cancel().catch(() => undefined); }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('A2A response is not an object');
   const body = raw as Record<string, unknown>;
   if (body['jsonrpc'] !== '2.0' || body['id'] !== id) throw new Error('A2A JSON-RPC identity changed');
@@ -167,19 +181,21 @@ export async function rpcTask(url: string, method: 'message/send' | 'tasks/get',
 
 /** Poll an already allowlisted A2A service until completion or a bounded task deadline. */
 export async function pollTerminalTask(url: string, taskId: string,
-  timeoutMs = TASK_TIMEOUT_MS, mode: 'fixture' | 'live' = 'fixture'): Promise<A2ATask> {
+  timeoutMs = TASK_TIMEOUT_MS, mode: 'fixture' | 'live' = 'fixture', signal?: AbortSignal): Promise<A2ATask> {
   if (!['fixture', 'live'].includes(mode) || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > (mode === 'live' ? 65_000 : TASK_TIMEOUT_MS)) {
     throw new Error('invalid task deadline');
   }
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     let polled: A2ATask;
     try {
       polled = await rpcTask(url, 'tasks/get', { id: taskId },
-        Math.max(1, Math.min(RPC_TIMEOUT_MS, remaining)));
+        Math.max(1, Math.min(RPC_TIMEOUT_MS, remaining)), signal);
     } catch (error) {
+      signal?.throwIfAborted();
       if (Date.now() >= deadline ||
           (error instanceof Error && error.name === 'TimeoutError' && remaining <= RPC_TIMEOUT_MS)) {
         throw new Error('A2A task deadline expired', { cause: error });
@@ -189,7 +205,7 @@ export async function pollTerminalTask(url: string, taskId: string,
     if (Date.now() >= deadline) throw new Error('A2A task deadline expired');
     if (polled.id !== taskId) throw new Error('A2A task changed identity during polling');
     if (polled.status.state === 'completed' || polled.status.state === 'failed') return polled;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+    await delay(Math.min(25, Math.max(1, deadline - Date.now())), undefined, { signal });
   }
   throw new Error('A2A task deadline expired');
 }

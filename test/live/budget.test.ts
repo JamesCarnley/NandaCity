@@ -13,6 +13,27 @@ async function api() {
 export const prices = { initialize: '1', initialized: '1', list: '1', places: '1', events: '1', transit: '1', generate: '1', cancel: '1', delete: '1' };
 export const budgetOptions = { sessionCapMicros: '1000', runCapMicros: '10', prices, pricingExpiresAt: '2026-10-05T00:00:00Z', now: () => Date.parse('2026-10-03T20:00:00Z') };
 
+test('settlement observes physical callback release without closing or replenishing the ledger', async (t) => {
+  const { LiveBudget } = await api(); const directory = await mkdtemp(join(tmpdir(), 'city-settled-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledger = await LiveBudget.open(directory, budgetOptions), run = await ledger.begin('noncooperative');
+  let entered!: () => void, release!: () => void;
+  const arrived = new Promise<void>((r) => { entered = r; }), barrier = new Promise<void>((r) => { release = r; });
+  const dispatch = run.dispatch('generate', async () => { entered(); await barrier; });
+  try {
+    await arrived; run.cancel(); await assert.rejects(dispatch, /cancelled/); await run.finish();
+    assert.equal(typeof ledger.settled, 'function');
+    let settled = false; const waiting = ledger.settled().then(() => { settled = true; });
+    await Promise.resolve(); await Promise.resolve(); assert.equal(settled, false);
+    assert.equal(ledger.snapshot().reservedCostMicros, '1');
+    release(); await waiting;
+    assert.equal(JSON.parse(await readFile(join(directory, 'budget.json'), 'utf8')).runs[0].attempts[0].outcome, 'cancelled');
+    await assert.rejects(LiveBudget.open(directory, budgetOptions), /writer/);
+    const next = await ledger.begin('next'); await next.finish();
+    assert.equal(ledger.snapshot().reservedCostMicros, '1');
+  } finally { release(); await dispatch.catch(() => undefined); await ledger.close(); }
+});
+
 test('a closed writer cannot finalize or settle an old run over a replacement writer', async (t) => {
   const { LiveBudget } = await api(); const directory = await mkdtemp(join(tmpdir(), 'city-writer-fence-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

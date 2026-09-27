@@ -4,6 +4,19 @@ import test from 'node:test';
 
 import { fetchOwnedCard } from '../../src/demo/twoIndexes.js';
 
+test('owned AgentCard caller cancellation closes a stalled physical body', { timeout: 2000 }, async () => {
+  let entered!: () => void; let closed!: () => void;
+  const arrived = new Promise<void>((r) => { entered = r; }); const disconnected = new Promise<void>((r) => { closed = r; });
+  const server = createServer((_req, res) => { res.on('close', closed); res.writeHead(200); res.write('{'); entered(); });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const origin = `http://127.0.0.1:${address.port}`, abort = new AbortController();
+  const pending = fetchOwnedCard(`${origin}/cards/1.json`, origin, abort.signal);
+  const timeout = setTimeout(() => server.closeAllConnections(), 1000);
+  try { await arrived; abort.abort(new Error('session reset')); await assert.rejects(pending, /session reset/); await disconnected; }
+  finally { clearTimeout(timeout); server.closeAllConnections(); await new Promise<void>((r) => server.close(() => r())); }
+});
+
 test('owned AgentCard fetch refuses query/redirect and over-budget bytes', async () => {
   const server = createServer((request, response) => {
     if (request.url === '/cards/1.json') { response.end('{}'); return; }

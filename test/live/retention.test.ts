@@ -114,7 +114,12 @@ test('caller retention is bounded by the real signed runtime response and local 
       }, () => now);
     try {
       assert.equal(retained.earlierByteCheck?.answerBinding, 'matched', 'use the actual signed answer bytes');
+      const copy = retained.readContent()!;
+      assert.equal(Buffer.from(copy).toString(), CONTENT); copy.fill(0);
+      const second = retained.readContent()!;
+      assert.equal(Buffer.from(second).toString(), CONTENT, 'server read returns an independently disposable copy'); second.fill(0);
       now = effectiveExpiry;
+      assert.equal(retained.readContent(), undefined);
       assert.deepEqual(retained.content(), { contentAvailability: 'expired', semanticReplay: 'unavailable' });
       assert.equal(retained.retention.expiresAt, effectiveExpiry);
       assert.deepEqual(seenPolicies, [{ ...retention, expiresAt: effectiveExpiry }, { ...retention, expiresAt: effectiveExpiry }]);

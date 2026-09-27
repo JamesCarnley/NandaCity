@@ -96,7 +96,8 @@ function unavailable(origin: string, reason: string): DiscoveryVerification {
 /** Re-reads chain and card with a separate client. Exported observations are evidence to compare, not authority. */
 export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: PublicClient,
   domain: IdentityContinuityDomain, filter: ServiceFilter, allowedCardOrigin: string,
-  configured?: { retention: LicensedRetention; answerBytes?: Uint8Array }): Promise<JourneyReport> {
+  configured?: { retention: LicensedRetention; answerBytes?: Uint8Array }, signal?: AbortSignal): Promise<JourneyReport> {
+  signal?.throwIfAborted();
   const origin = evidence?.candidate?.observerOrigin ?? 'unknown';
   let task: A2ATask;
   let cardBytes: Uint8Array;
@@ -123,7 +124,7 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
   let discovery: DiscoveryVerification;
   try {
     discovery = await verifyDiscoveryWithCard(evidence.candidate, client, domain, filter,
-      (url) => fetchOwnedCard(url, allowedCardOrigin));
+      (url) => fetchOwnedCard(url, allowedCardOrigin, signal));
   } catch (error) {
     return stopped(unavailable(origin, 'discovery check could not complete'), 'discovery',
       error instanceof Error ? error.message : 'discovery check failed');
@@ -131,7 +132,7 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
   if (discovery.status !== 'verified') return stopped(discovery, 'discovery',
     `${discovery.status}: ${discovery.reason}`);
   let fetchedCard: Uint8Array;
-  try { fetchedCard = await fetchOwnedCard(evidence.candidate.declaration.url, allowedCardOrigin); }
+  try { fetchedCard = await fetchOwnedCard(evidence.candidate.declaration.url, allowedCardOrigin, signal); }
   catch (error) {
     return stopped(unavailable(origin, 'independent card fetch failed'), 'discovery',
       error instanceof Error ? error.message : 'card fetch failed');

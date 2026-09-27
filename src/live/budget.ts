@@ -185,6 +185,19 @@ export class LiveBudget {
     this.#closing = closing;
     try { await closing; } finally { this.#closing = undefined; }
   }
+  /** Observe physical settlement and durable writes. Caller must fence new work first.
+   * This does not close the writer, finish runs, or release conservative reservations. */
+  async settled(): Promise<void> {
+    for (;;) {
+      const tail = this.#tail; await tail;
+      if (tail !== this.#tail) continue;
+      if (!this.#active) return;
+      await new Promise<void>((resolve) => {
+        const wake = () => { this.#waiters.delete(wake); resolve(); };
+        this.#waiters.add(wake);
+      });
+    }
+  }
 }
 
 export class BudgetRun {

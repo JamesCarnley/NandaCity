@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import type { ReadRequestBudget, ReadRequestLease } from '../identity/rpcTransport.js';
 import type { DiscoveredCandidate, ServiceFilter } from './verifyDiscovery.js';
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -43,6 +44,16 @@ export type IndexCoverage = z.infer<typeof coverage>;
 export type IndexOriginResult = { observerOrigin: string; coverage: IndexCoverage | null;
   errors: string[]; available: boolean; pages: number };
 export type IndexSearchResult = { candidates: DiscoveredCandidate[]; origins: IndexOriginResult[] };
+export type IndexSearchOptions = {
+  signal?: AbortSignal;
+  requestBudget?: (origin: string, kind: 'search' | 'observation') => ReadRequestBudget;
+  filterDeclarations?: boolean;
+  /** Optional further caller-domain rejection before spending an observation request. */
+  rejectDeclaration?: (agent: DiscoveredCandidate['agent']) => string | null;
+  onFiltered?: (origin: string, agent: DiscoveredCandidate['agent'], reason: string) => void;
+  /** Awaited per origin: verification shares the origin's allocation with acquisition. */
+  onCandidate?: (candidate: DiscoveredCandidate) => Promise<void>;
+};
 
 function configuredOrigin(raw: string): string {
   const url = new URL(raw);
@@ -53,31 +64,56 @@ function configuredOrigin(raw: string): string {
   return url.origin;
 }
 
-async function boundedJson(url: URL, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(url, { ...init, redirect: 'manual',
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-  if (response.status >= 300 && response.status < 400) throw new RejectedIndexResponse('Index redirect refused');
-  if (!response.ok) throw new Error(`Index HTTP ${response.status}`);
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('Index response has no body');
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    length += value.byteLength;
-    if (length > MAX_BODY_BYTES) { await reader.cancel(); throw new RejectedIndexResponse('Index response exceeds 2 MiB'); }
-    chunks.push(value);
+async function boundedJson(url: URL, init: RequestInit | undefined, options: IndexSearchOptions): Promise<unknown> {
+  const controller = new AbortController();
+  const abort = () => controller.abort(new Error('Index request cancelled/deadline'));
+  options.signal?.addEventListener('abort', abort, { once: true });
+  if (options.signal?.aborted) abort();
+  // A lease owns its deadline and exhaustion diagnostic; do not race it with
+  // another default timer. Standalone callers retain the legacy timeout.
+  const timer = options.requestBudget ? undefined : setTimeout(abort, REQUEST_TIMEOUT_MS);
+  let lease: ReadRequestLease | undefined, response: Response | undefined;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    controller.signal.throwIfAborted();
+    const kind = url.pathname.includes('/identity-observations/') ? 'observation' : 'search';
+    lease = await options.requestBudget?.(url.origin, kind).open(controller.signal);
+    lease?.signal.addEventListener('abort', abort, { once: true });
+    if (lease?.signal.aborted) abort();
+    controller.signal.throwIfAborted(); lease?.check();
+    response = await fetch(url, { ...init, redirect: 'manual', signal: controller.signal });
+    if (response.status >= 300 && response.status < 400) throw new RejectedIndexResponse('Index redirect refused');
+    if (!response.ok) throw new Error(`Index HTTP ${response.status}`);
+    reader = response.body?.getReader();
+    if (!reader) throw new Error('Index response has no body');
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      controller.signal.throwIfAborted(); lease?.check();
+      if (done) break;
+      lease?.bytes(value.byteLength);
+      length += value.byteLength;
+      if (length > MAX_BODY_BYTES) { await reader.cancel(); throw new RejectedIndexResponse('Index response exceeds 2 MiB'); }
+      chunks.push(value);
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; }
+    catch { throw new RejectedIndexResponse('Index response is not JSON'); }
+    return parsed;
+  } finally {
+    controller.abort(); clearTimeout(timer);
+    options.signal?.removeEventListener('abort', abort);
+    lease?.signal.removeEventListener('abort', abort);
+    try { if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      else await response?.body?.cancel().catch(() => {}); }
+    finally { lease?.close(); }
   }
-  let parsed: unknown;
-  try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; }
-  catch { throw new RejectedIndexResponse('Index response is not JSON'); }
-  return parsed;
 }
 
 function same(left: unknown, right: unknown): boolean { return JSON.stringify(left) === JSON.stringify(right); }
 
-async function searchOne(rawOrigin: string, filter: ServiceFilter): Promise<{
+async function searchOne(rawOrigin: string, filter: ServiceFilter, options: IndexSearchOptions): Promise<{
   candidates: DiscoveredCandidate[]; origin: IndexOriginResult;
 }> {
   const observerOrigin = configuredOrigin(rawOrigin);
@@ -91,7 +127,7 @@ async function searchOne(rawOrigin: string, filter: ServiceFilter): Promise<{
       const body = await boundedJson(new URL('/api/ard/services/search', observerOrigin), {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ filter, pageSize: 100, ...(pageToken ? { pageToken } : {}) }),
-      });
+      }, options);
       const parsed = searchResponse.safeParse(body);
       if (!parsed.success) throw new RejectedIndexResponse('malformed Index search response');
       response = parsed.data;
@@ -114,9 +150,17 @@ async function searchOne(rawOrigin: string, filter: ServiceFilter): Promise<{
         origin.errors.push('rejected: source reference mismatch');
         continue;
       }
+      const filtered = options.filterDeclarations && !(['capabilityIds', 'areaServed', 'interfaces'] as const)
+        .every((key) => filter[key] === undefined || filter[key]!.some((value) => item[key].includes(value)));
+      const rejected = filtered ? 'declaration does not match requested filter' :
+        options.rejectDeclaration?.(authority.agent as DiscoveredCandidate['agent']);
+      if (rejected) {
+        options.onFiltered?.(observerOrigin, authority.agent as DiscoveredCandidate['agent'], rejected);
+        continue;
+      }
       try {
         const path = `/api/ard/identity-observations/${authority.observationId}`;
-        const parsed = observationResponse.safeParse(await boundedJson(new URL(path, observerOrigin)));
+        const parsed = observationResponse.safeParse(await boundedJson(new URL(path, observerOrigin), undefined, options));
         if (!parsed.success) throw new RejectedIndexResponse('malformed Index observation response');
         const direct = parsed.data;
         let parsedBytes: unknown;
@@ -132,9 +176,11 @@ async function searchOne(rawOrigin: string, filter: ServiceFilter): Promise<{
           origin.errors.push('rejected: observation and projection mismatch');
           continue;
         }
-        candidates.push({ observerOrigin, agent: authority.agent as DiscoveredCandidate['agent'],
+        const candidate = { observerOrigin, agent: authority.agent as DiscoveredCandidate['agent'],
           agentURI: direct.observation.agentURI, declaration: direct.observation.declaration,
-          observationBlock: authority.block as DiscoveredCandidate['observationBlock'] });
+          observationBlock: authority.block as DiscoveredCandidate['observationBlock'] };
+        candidates.push(candidate);
+        await options.onCandidate?.(candidate);
       } catch (error) {
         origin.errors.push(`${error instanceof RejectedIndexResponse ? 'rejected' : 'unavailable'}: observation read failed: ${
           error instanceof Error ? error.message : String(error)}`);
@@ -150,11 +196,12 @@ async function searchOne(rawOrigin: string, filter: ServiceFilter): Promise<{
 }
 
 /** Search only explicitly configured Index origins; never treat matching Index rows as authority. */
-export async function searchIndexes(origins: readonly string[], filter: ServiceFilter): Promise<IndexSearchResult> {
+export async function searchIndexes(origins: readonly string[], filter: ServiceFilter,
+  options: IndexSearchOptions = {}): Promise<IndexSearchResult> {
   if (origins.length === 0 || origins.length > 2) throw new Error('configure one or two Index origins');
   const unique = origins.map(configuredOrigin);
   if (new Set(unique).size !== unique.length) throw new Error('Index origins must be distinct');
-  const results = await Promise.all(unique.map((origin) => searchOne(origin, filter)));
+  const results = await Promise.all(unique.map((origin) => searchOne(origin, filter, options)));
   return { candidates: results.flatMap((result) => result.candidates),
     origins: results.map((result) => result.origin) };
 }

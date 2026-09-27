@@ -1,5 +1,67 @@
 # NANDA City
 
+Choose a city, compare three complete-service specialists, ask one for an evening
+plan, then see why feedback changes the next selection. This local demo keeps
+identity, discovery, signed service receipts and explained ranking inspectable
+while the two Indexes remain replaceable infrastructure.
+
+## Try the local story
+
+The web demo is **synthetic**, with fictional plans for Chicago and Boston. Each
+of three simulated operators owns both city services. They are competing choices,
+not three mandatory roles. The generated Safe owners all live on the same host;
+this is not independent custody or independent-customer reputation.
+
+After installing the fixture prerequisites below:
+
+```sh
+npm ci
+export NANDA_INDEX_CHECKOUT=/absolute/path/to/pinned/nanda-index-v2
+npm run demo:doctor
+npm run demo:session -- --index-checkout "$NANDA_INDEX_CHECKOUT"
+```
+
+Open the exact `http://127.0.0.1:...` URL printed by the launcher. Initial startup
+builds the pinned Index and prepares disposable local resources; allow about a
+minute. Optionally add `--port 3000`. No account, API key or public-chain wallet is
+needed. Node 24+, Anvil 1.7.1, local Docker and the clean pinned Index checkout are
+required. **Town and its Python environment are not needed for this
+curator-admitted fixture.** Doctor reports their separate full-check/native-Town
+prerequisites without blocking this demo or claiming a Town pass.
+
+1. Compare Chicago or Boston. Inspect all three alternatives and select one;
+   selection alone sends nothing.
+2. Ask it. Inspect the fictional dinner, activity, route, budget and gaps, alongside
+   separately observed sent, accepted and completed stages.
+3. Rate its usefulness. Publication, canonical read-back, Index retention and
+   policy contribution are separate findings. A new reviewer remains unweighted.
+4. Expand resilience controls. Stop or tamper with Index A, stop B too, then
+   recover the actual processes and compare again. Migrate an operator using its
+   generated backup: both city IDs remain while owner/runtime/endpoints change.
+5. Recompute the frozen ranking in a fresh process. This uses the same verifier
+   on the same host, not an independent implementation or an offline proof. The
+   separate card host and local RPC remain required after provider endpoints stop.
+   Run the explicitly separate synthetic HTTPS-origin comparison when desired;
+   it is never an automatic Ethereum-failure fallback.
+
+Use **Reset this local session** to cancel work, await cleanup and acquire a fresh
+generation. The page shows starting/resetting states and GET refreshes never
+repeat a call. Ctrl-C waits for owned resource cleanup and stops the listener.
+Do not use shared or public hosting: this binds only `127.0.0.1`, validates
+Host/Origin and per-generation action tokens, and is a same-host demo rather than
+a multi-user security boundary. Do not remove unrelated Docker containers.
+
+Saved HTML/JSON are read-only public snapshots, without action tokens or mutation
+forms. Authored fixture answers remain exportable. Configured licensed sessions
+can use the same server API, with bounded transient display, intact attribution,
+expiry and receipts-only export. There is **no licensed CLI launcher or concrete
+model adapter**: source/model terms, accounts, pricing and spending approval are
+still owner-gated. Expired answers cannot be semantically replayed; receipts and
+earlier byte-check observations remain. A hostile recipient can still copy visible
+content. No live-provider utility or Sepolia rehearsal is claimed.
+
+## Current capabilities and evidence
+
 The [local feedback retention drill](docs/feedback-retention.md) exercises a real
 signed A2A failure, two separate Index databases, provider/source loss,
 separate-process historical verification, reorg, revocation and empty-database
@@ -31,7 +93,7 @@ owner approval and non-owner execution, shared two-service onboarding, encrypted
 backup restore and same-account endpoint/runtime migration. It uses generated
 EOA-backed owners, threshold 1-of-2 and local infrastructure—not real custody,
 connected-wallet/passkey or ERC-1271 caller UX. Public-chain deployment, live city
-answers, real operator onboarding, an interactive UI and deployed services remain
+answers, real operator onboarding and deployed services remain
 outside this prototype.
 
 The opt-in [HTTPS-origin comparison](docs/origin-comparison.md) runs one synthetic
@@ -65,7 +127,8 @@ it does not fetch an AgentCard URL.
 - A clean checkout of public `JamesCarnley/nanda-index-v2` at pinned commit
   `b9c6ccef4907c5dc3c7d9d898cf671207166f435`, with `npm ci` run in its
   `server/` directory
-- Python 3.12.13 and a clean checkout of public `JamesCarnley/nandatown` at
+- For full checks and explicit native Town admission (not fixture launch):
+  Python 3.12.13 and a clean checkout of public `JamesCarnley/nandatown` at
   `bf8f226b4d7ae9543bd73995c000c64c7dcd7e09`, installed editable into a separate
   private virtual environment; `python3.12` below must be that exact version
 

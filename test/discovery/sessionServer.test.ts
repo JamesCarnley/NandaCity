@@ -1,0 +1,142 @@
+import assert from 'node:assert/strict';
+import { request, Server } from 'node:http';
+import test from 'node:test';
+import type { DemoSession, SessionAction, SessionView } from '../../src/demo/sessionController.js';
+import { eveningPlanInputSchema } from '../../src/a2a/input.js';
+
+function state(): SessionView {
+  return { mode: 'fixture', generation: 0, status: 'ready', lifecycleOperationId: 'life', operators: [], crossOperatorWrite: 'not-tested',
+    invocations: [], discovery: null, selection: null, operations: [], feedback: [], freshConsumer: null, originComparison: null,
+    feedbackCapacity: { total: 16, used: 0, exhausted: false }, limitations: [] };
+}
+test('loopback HTTP boundary rejects foreign requests and preserves one operation across duplicate POST and read refresh', async () => {
+  const api = await import('../../src/demo/sessionServer.js').catch(() => undefined);
+  assert.ok(api?.startSessionServer, 'loopback session server must exist');
+  const view = state(); let starts = 0, resets = 0;
+  const session: DemoSession = { view: () => structuredClone(view), ready: async () => {}, select: () => {},
+    start: (action: SessionAction, id = 'id') => { starts++; const op = { id, generation: view.generation, kind: action.kind, state: 'running' as const };
+      view.operations.push(op); return op; }, wait: async () => { throw new Error('HTTP must not wait on work'); },
+    frozenInput: () => { throw new Error('HTTP must never read private input'); }, readContent: () => undefined,
+    reset: async () => { resets++; view.generation++; }, close: async () => {} };
+  const server = await api.startSessionServer(session);
+  const send = (body: string, headers: Record<string, string> = {}, method = 'POST', path = '/action') => new Promise<{ status: number; body: string; headers: import('node:http').IncomingHttpHeaders }>((resolve, reject) => {
+    const req = request(`${server.origin}${path}`, { method, headers: { origin: server.origin, 'content-type': 'application/x-www-form-urlencoded', ...headers } }, (res) => {
+      let text = ''; res.setEncoding('utf8'); res.on('data', (s) => text += s); res.on('end', () => resolve({ status: res.statusCode!, body: text, headers: res.headers }));
+    }); req.on('error', reject); req.end(body);
+  });
+  try {
+    const page = await send('', {}, 'GET', '/'); assert.equal(page.status, 200);
+    const token = /name="token" value="([^"]+)"/.exec(page.body)![1]!;
+    const form = new URLSearchParams({ token, generation: '0', operationId: 'one', action: 'refresh', city: 'Chicago' }).toString();
+    for (const headers of [{ host: 'localhost:9999' }, { origin: 'https://foreign.example' }, { origin: '' }, { origin: 'null' }]) {
+      assert.equal((await send(form, headers)).status, 403);
+    }
+    assert.equal((await send(form.replace(token, 'wrong'))).status, 403);
+    assert.equal((await send('action=refresh')).status, 403);
+    assert.equal((await send(form + '&unknown=secret')).status, 400);
+    assert.equal((await send(form.replace('action=refresh', 'action=unknown'))).status, 400);
+    assert.equal((await send(form + '&padding=' + 'x'.repeat(20000))).status, 413);
+    assert.equal(starts, 0);
+    const posted = await send(form); assert.equal(posted.status, 303); assert.equal(starts, 1);
+    assert.equal((await send(form)).status, 303); assert.equal(starts, 1);
+    for (const path of ['/', '/status', posted.headers.location!]) assert.equal((await send('', {}, 'GET', path)).status, 200);
+    assert.equal(starts, 1, 'GET never replays an operation');
+    assert.equal((await send(form.replace('Chicago', 'Boston'))).status, 409);
+    for (const path of ['/export.html', '/export.json']) {
+      const saved = await send('', {}, 'GET', path); assert.equal(saved.status, 200);
+      assert.equal(saved.body.includes(token), false); assert.equal(saved.body.includes('<form'), false);
+    }
+    const reset = new URLSearchParams({ token, generation: '0', operationId: 'reset', action: 'reset' }).toString();
+    assert.equal((await send(reset)).status, 303); assert.equal(resets, 1);
+    assert.equal((await send(form)).status, 403, 'old generation token is invalidated');
+    assert.equal((await send('', { host: 'evil.example' }, 'GET', '/')).status, 403);
+    assert.equal(page.headers['cache-control'], 'no-store');
+    assert.equal(page.headers['referrer-policy'], 'same-origin', 'native same-origin forms must retain their literal Origin');
+  } finally { await server.close(); }
+});
+
+test('licensed HTTP form preserves the allowlisted walking plus transit choice', async () => {
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  const view = state(); view.mode = 'licensed';
+  view.licensedHint = { admittedReviewer: 'accepted', expiresAt: new Date(Date.now() + 3600000).toISOString() };
+  // Only the public fields consumed by this HTTP input boundary are needed.
+  view.discovery = { city: 'Chicago', status: 'complete', eligibleCount: 0, selected: [],
+    ranking: { policyResult: null, snapshot: 'matched' }, observation: { blockNumber: '1', blockHash: '0x00' } } as unknown as SessionView['discovery'];
+  const actions: SessionAction[] = [];
+  const session: DemoSession = { view: () => view, readContent: () => undefined, ready: async () => {}, select: () => {},
+    wait: async () => { throw new Error('HTTP must not wait on work'); }, frozenInput: () => { throw new Error('HTTP must not read private input'); },
+    reset: async () => {}, close: async () => {},
+    start: (action, id = 'id') => { actions.push(action); return { id, generation: 0, kind: action.kind, state: 'queued' }; } };
+  const server = await startSessionServer(session);
+  try {
+    const page = await (await fetch(server.origin)).text();
+    const token = /name="token" value="([^"]+)"/.exec(page)![1]!;
+    const year = new Date().getUTCFullYear() + 1;
+    const form = new URLSearchParams({ token, generation: '0', operationId: 'licensed', action: 'invoke', reviewer: 'accepted',
+      start: `${year}-01-15T18:00:00-06:00`, end: `${year}-01-15T22:00:00-06:00`, area: 'Loop', budget: '8500',
+      transport: 'walk-and-public-transit', preferences: 'An evening activity' }).toString();
+    const post = (body: string) => fetch(`${server.origin}/action`, { method: 'POST', redirect: 'manual',
+      headers: { origin: server.origin, 'content-type': 'application/x-www-form-urlencoded' }, body });
+    assert.equal((await post(form.replace('walk-and-public-transit', 'unknown'))).status, 400);
+    assert.equal((await post(form + '&transport=walk')).status, 400, 'duplicate form fields remain rejected');
+    assert.equal((await post(form + '&unknown=walk')).status, 400);
+    assert.equal(actions.length, 0);
+    assert.equal((await post(form)).status, 303);
+    assert.equal(actions.length, 1);
+    const action = actions[0]!; assert.equal(action.kind, 'invoke');
+    assert.ok(action.kind === 'invoke' && action.input);
+    assert.deepEqual(eveningPlanInputSchema.parse(action.input).transport, ['walk', 'public-transit']);
+  } finally { await server.close(); }
+});
+
+test('authenticated reset stays reachable and coalesces at the normal submission cap', async () => {
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  const view = state(), cleanup = Promise.withResolvers<void>(); let starts = 0, resets = 0;
+  const session: DemoSession = { view: () => view, readContent: () => undefined, ready: async () => {}, select: () => {},
+    wait: async () => { throw new Error('HTTP must not wait on work'); }, frozenInput: () => { throw new Error('HTTP must not read private input'); }, close: async () => {},
+    start: (action, id = 'id') => { starts++; return { id, generation: 0, kind: action.kind, state: 'queued' }; },
+    reset: async () => { resets++; view.status = 'resetting'; await cleanup.promise; view.generation++; view.status = 'starting'; } };
+  const server = await startSessionServer(session);
+  try {
+    const page = await (await fetch(server.origin)).text();
+    const token = /name="token" value="([^"]+)"/.exec(page)![1]!;
+    const post = (operationId: string, action = 'refresh', fields: Record<string, string> = { city: 'Chicago' }) =>
+      fetch(`${server.origin}/action`, { method: 'POST', redirect: 'manual', headers: { origin: server.origin,
+        'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token, generation: '0', operationId, action, ...fields }) });
+    for (let i = 0; i < 512; i++) assert.equal((await post(`normal-${i}`)).status, 303);
+    assert.equal((await post('overflow')).status, 429); assert.equal(starts, 512);
+    assert.equal((await post('normal-0')).status, 303, 'accepted replay still deduplicates at capacity');
+    assert.equal((await post('reset', 'reset', { token: 'wrong' })).status, 403);
+    assert.equal((await post('normal-0', 'reset', {})).status, 409, 'reset cannot reuse a conflicting operation ID');
+    const reset = await post('reset', 'reset', {}); assert.equal(reset.status, 303); assert.equal(resets, 1);
+    assert.equal((await post('reset', 'reset', {})).status, 303); assert.equal(resets, 1);
+    const coalesced = await post('another-reset', 'reset', {});
+    assert.equal(coalesced.status, 303); assert.equal(coalesced.headers.get('location'), reset.headers.get('location'));
+    assert.equal(resets, 1, 'only one reserved reset is dispatched while cleanup is pending');
+    assert.equal((await post('reset')).status, 409, 'reserved reset ID also rejects conflicting normal actions');
+    cleanup.resolve(); await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(view.generation, 1); assert.equal(view.status, 'starting');
+    assert.equal((await post('old-generation')).status, 403);
+  } finally { cleanup.resolve(); await server.close(); }
+});
+
+test('literal loopback boundary uses the browser canonical origin for the HTTP default port', async (t) => {
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  // Simulate the OS-reported port only: keep the real listener on an ephemeral
+  // port, avoiding a privileged/global port dependency in this boundary test.
+  const address = Server.prototype.address; let transportPort = 0;
+  const replacement = t.mock.method(Server.prototype, 'address', function (this: Server) {
+    const actual = address.call(this); assert.ok(actual && typeof actual !== 'string'); transportPort = actual.port;
+    return { ...actual, port: 80 };
+  });
+  const server = await startSessionServer({ view: state, readContent: () => undefined } as unknown as DemoSession);
+  replacement.mock.restore();
+  try {
+    const result = await new Promise<number>((resolve, reject) => {
+      const req = request(`http://127.0.0.1:${transportPort}/`, { headers: { host: '127.0.0.1' } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode!)); });
+      req.on('error', reject); req.end();
+    });
+    assert.equal(result, 200, 'browser default-port Host must match its canonical Origin');
+    assert.equal(server.origin, 'http://127.0.0.1');
+  } finally { await server.close(); }
+});

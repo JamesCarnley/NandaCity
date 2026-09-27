@@ -21,14 +21,22 @@ export const ownedFetch: typeof fetch = (input, init) => {
 /** Nested resource scopes share one signal owner. Cleanup is lexical: cancellation
  * unwinds awaited work, not a Promise.race against still-running acquisition.
  * Callbacks must observe signal/check and await all work they start. */
-export async function withOwnedLifecycle<T>(run: (lifecycle: OwnedLifecycle) => Promise<T>): Promise<T> {
+export async function withOwnedLifecycle<T>(run: (lifecycle: OwnedLifecycle) => Promise<T>, signal?: AbortSignal): Promise<T> {
   const existing = current.getStore();
-  if (existing) { existing.check(); return run(existing); }
+  signal?.throwIfAborted();
+  if (existing) {
+    existing.check();
+    if (!signal) return run(existing);
+    const combined = AbortSignal.any([existing.signal, signal]);
+    const nested = { signal: combined, check: () => combined.throwIfAborted() };
+    return current.run(nested, async () => { nested.check(); const value = await run(nested); nested.check(); return value; });
+  }
   const controller = new AbortController();
+  const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
   let received: 'SIGINT' | 'SIGTERM' | undefined;
   let watchdog: ReturnType<typeof setTimeout> | undefined;
-  const lifecycle: OwnedLifecycle = { signal: controller.signal,
-    check: () => { controller.signal.throwIfAborted(); } };
+  const lifecycle: OwnedLifecycle = { signal: combined,
+    check: () => { combined.throwIfAborted(); } };
   const remove = (): void => {
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', terminate);

@@ -73,6 +73,18 @@ ranking and generated-credential account/recovery demonstrations:
   with a separate Node process rechecking seven signed cases against the live
   owned loopback chain and exact cards before fixture teardown; and
 - a self-contained static HTML comparison with unabridged evidence JSON; and
+- an owned fixture/licensed session and loopback Node SSR view for choosing either
+  city, selecting/invoking services, publishing feedback, observing explained
+  ranking, controlling actual Index faults and recovering/migrating operator IDs;
+  mutations are serialized and operation-ID replay is idempotent, reset awaits
+  owned cleanup, and the listener enforces literal Host/Origin and session tokens;
+- bounded server-only licensed reads with expiry/no-store display and disposable
+  byte copies; saved session exports contain receipts, never licensed answers or
+  private request/card bytes. The fixture launcher supplies no model adapter,
+  external credentials or owner-approved source permissions; and
+- explicit owned session actions for the synthetic HTTPS-origin comparison and
+  same-host fresh-process raw-evidence ranking reconstruction, with cancellation;
+  the card host and local RPC remain required, not offline verification; and
 - a City-authored separate Node client process that owns an ephemeral caller key,
   discovers one of three local candidates per city through both real Indexes,
   invokes the published loopback A2A service, and exports evidence the parent
@@ -111,9 +123,9 @@ changes. A malicious owner removing the backup defeats this loss-recovery model.
 Do not broaden the local write path to a public or non-loopback RPC. The demo
 fetches AgentCards only from its own exact loopback origin/paths; arbitrary
 external card fetching is not supported. Index rows are candidates, not authority.
-Public-chain writes, deployed A2A service operation, and an
-interactive UI remain outside this boundary. The static HTML report is a
-read-only artifact, not an interactive selection UI. The loopback task service implements only
+Public-chain writes and deployed A2A service operation remain outside this
+boundary. The legacy static HTML report remains a read-only artifact; the local
+session UI is not public hosting or a multi-user security boundary. The loopback task service implements only
 `message/send` and `tasks/get`; body signatures do not authorize polling, and
 the subset is not a complete A2A implementation.
 The journey JSON retains original evidence, but its stopped ephemeral Anvil is
@@ -121,7 +133,7 @@ not a durable authority source; do not claim that later parties can independentl
 re-read chain history from the export alone.
 The comparison and ranking consumers share the same test host and owned
 chain; they do not prove independent operator custody, live city facts, or
-semantic quality. The interactive UI, public-chain ranking service, and
+semantic quality. A public-chain ranking service, real source/model utility and
 operator-separated evidence adapters remain unbuilt.
 Local feedback publication alone is not independent canonical read-back, document
 availability, historical signature ordering, service quality, or Index retention.
