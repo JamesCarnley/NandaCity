@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { decodeFeedbackIndexSource, feedbackIndexOrigin, readIndexFeedbackDocument, readIndexFeedbackHistory,
   type FeedbackIndexSource, type IndexFeedbackEvent, type IndexFeedbackHistoryRead } from '../feedback/indexClient.js';
 import { readReputationActivation, type ReputationActivationObservation, type ReputationDeploymentProvenance } from '../feedback/reputationActivation.js';
+import { readFreshPairZeroCheckpoint, type CheckpointRpcLedger, type CheckpointRpcSource,
+  type FreshPairZeroInput, type FreshPairZeroLimits, type FreshPairZeroObservation } from '../feedback/pairZeroCheckpoint.js';
 import { decodeRawRegistryFeedbackEvent, readRegistryFeedbackObservation, type RegistryFeedbackObservation } from '../feedback/registryObservation.js';
 import type { FeedbackPublicationDomain } from '../feedback/publication.js';
 import { reputationRegistryAbi } from '../feedback/registry.js';
@@ -12,8 +14,10 @@ import { boundRpcFetch } from '../identity/rpcTransport.js';
 import { ownedFetch } from '../demo/ownedLifecycle.js';
 import { createRankingReadBudget, RankingReadBudget, type RankingReadBudgetSnapshot, type RankingReadLane } from './readBudget.js';
 
-export type AcceptedReviewerCoverageInput = {
-  rpcOrigin: string; provenance: ReputationDeploymentProvenance;
+export type CoverageStart = { provenance: ReputationDeploymentProvenance; checkpoint?: never } |
+  { checkpoint: Omit<FreshPairZeroInput, 'parentBudget' | 'signal'>; provenance?: never };
+export type AcceptedReviewerCoverageInput = CoverageStart & {
+  rpcOrigin: string;
   observation: { blockNumber: bigint; blockHash: Hex };
   agentIds: readonly string[]; reviewers: readonly Address[];
   indexes: readonly [{ origin: string; source: FeedbackIndexSource }, { origin: string; source: FeedbackIndexSource }];
@@ -26,6 +30,9 @@ export type AcceptedReviewerCoverage = {
   status: 'complete' | 'unknown'; qualification: 'rpc-derived-not-state-proof'; domain: FeedbackPublicationDomain;
   observation: { blockNumber: string; blockHash: Hex; blockTimestamp?: string };
   activation: ReputationActivationObservation | null;
+  checkpoint: FreshPairZeroObservation | null;
+  /** Private untrusted provider replies. Never include in public report sidecars. */
+  privateCheckpointLedger: CheckpointRpcLedger | null;
   batchBasis: 'matched' | 'changed' | 'unavailable'; pairs: CoveragePair[];
   acquisitions: Array<Omit<IndexFeedbackHistoryRead, 'history'> & { origin: 0 | 1; pair: number }>;
   rows: Array<{ origin: 0 | 1; pair: number; event: IndexFeedbackEvent;
@@ -43,6 +50,22 @@ const domainSchema = z.strictObject({ chainId: z.number().int().positive().max(N
   identityRegistry: address, reputationRegistry: address });
 const transactionSchema = z.strictObject({ transactionHash: hash, blockNumber: uint, blockHash: hash, transactionIndex: coordinate });
 const creationSchema = transactionSchema.extend({ address, nonce: uint, runtimeCodeHash: hash });
+const checkpointBasisSchema = z.strictObject({ blockNumber: z.bigint().min(0n).max((1n << 256n) - 1n), blockHash: hash });
+// Only the acquisition reader copies bounded raw wire/card bytes. Both consumers
+// invoke it before their first await; this schema copies the remaining authority graph.
+export const checkpointConfigurationSchema = z.strictObject({ kind: z.literal('fresh-pair-zero-v1'), domain: domainSchema,
+  pins: z.strictObject({ proxy: z.strictObject({ fullRuntimeHex: z.string().max(65_538).regex(/^0x(?:[0-9a-f]{2})*$/i).transform((v) => v as Hex), fullRuntimeHash: hash, reviewId: z.string().min(1).max(256) }),
+    identity: z.strictObject({ implementation: address, fullRuntimeHash: hash, sourceBuildId: z.string().min(1).max(256) }),
+    reputation: z.strictObject({ implementation: address, fullRuntimeHash: hash, sourceBuildId: z.string().min(1).max(256) }) }),
+  registrationBasis: checkpointBasisSchema, zeroBasis: checkpointBasisSchema, observation: checkpointBasisSchema,
+  registrations: z.array(transactionSchema.extend({ agentId: uint, owner: address, mintLogIndex: coordinate, registeredLogIndex: coordinate,
+    profileBasis: checkpointBasisSchema, cardBytes: z.instanceof(Uint8Array).refine((v) => v.byteLength <= 65_536) })).max(48),
+  pairs: z.array(z.strictObject({ agentId: uint, reviewer: address })).max(48),
+  source: z.custom<CheckpointRpcSource>((v) => !!v && typeof v === 'object' && 'kind' in v &&
+    ((v.kind === 'literal-fixture' && Object.keys(v).every((k) => ['kind', 'exchanges'].includes(k))) ||
+      (v.kind === 'bounded-http' && Object.keys(v).every((k) => ['kind', 'url'].includes(k))))),
+  limits: z.record(z.string(), z.number()).transform((v) => v as Partial<FreshPairZeroLimits>).optional(),
+}).transform(({ limits, ...config }) => ({ ...config, ...(limits ? { limits } : {}) }));
 const boundedMap = z.unknown().refine((v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length <= 16)
   .pipe(z.record(z.string().max(256), z.string().max(256)));
 const provenanceSchema = z.strictObject({ domain: domainSchema, deployer: address,
@@ -52,11 +75,15 @@ const provenanceSchema = z.strictObject({ domain: domainSchema, deployer: addres
       optimizer: z.strictObject({ enabled: z.literal(true), runs: z.literal(200) }) }) }),
   bootstrap: creationSchema, proxy: creationSchema, implementation: creationSchema,
   activation: transactionSchema.extend({ upgradedLogIndex: coordinate }) });
-const inputSchema = z.strictObject({ rpcOrigin: z.string().transform(feedbackIndexOrigin), provenance: provenanceSchema,
+const inputBase = z.strictObject({ rpcOrigin: z.string().transform(feedbackIndexOrigin),
   observation: z.strictObject({ blockNumber: z.bigint().min(0n).max((1n << 256n) - 1n), blockHash: hash }),
   agentIds: z.array(uint).max(6), reviewers: z.array(address).max(8),
   indexes: z.tuple([z.strictObject({ origin: z.string().transform(feedbackIndexOrigin), source: z.unknown().transform(decodeFeedbackIndexSource) }),
     z.strictObject({ origin: z.string().transform(feedbackIndexOrigin), source: z.unknown().transform(decodeFeedbackIndexSource) })]) });
+const inputSchema = z.union([
+  inputBase.extend({ provenance: provenanceSchema, checkpoint: z.never().optional() }),
+  inputBase.extend({ checkpoint: checkpointConfigurationSchema, provenance: z.never().optional() }),
+]);
 const counterParameters = parseAbiParameters('uint64');
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const quantity = (v: unknown): bigint => {
@@ -76,18 +103,26 @@ export async function readAcceptedReviewerCoverage(input: AcceptedReviewerCovera
     config = inputSchema.parse(configuration);
     if (new Set(config.agentIds).size !== config.agentIds.length || new Set(config.reviewers).size !== config.reviewers.length ||
       config.indexes[0].origin === config.indexes[1].origin) throw new Error();
-    const d = config.provenance.domain;
+    const d = (config.checkpoint ?? config.provenance).domain;
     for (const { source } of config.indexes) if (source.chainId !== d.chainId || !same(source.genesisHash, d.genesisHash) ||
       !same(source.identityRegistry, d.identityRegistry) || !same(source.reputationRegistry, d.reputationRegistry)) throw new Error();
+    if (config.checkpoint) {
+      const c = config.checkpoint;
+      const expected = new Set(config.agentIds.flatMap((id) => config.reviewers.map((reviewer) => `${id}:${reviewer}`)));
+      if (c.observation.blockNumber !== config.observation.blockNumber || !same(c.observation.blockHash, config.observation.blockHash) ||
+        c.pairs.length !== expected.size || new Set(c.pairs.map((p) => `${p.agentId}:${p.reviewer}`)).size !== expected.size ||
+        c.pairs.some((p) => !expected.has(`${p.agentId}:${p.reviewer}`))) throw new Error();
+    }
     if (borrowed && (!(borrowed instanceof RankingReadBudget) || borrowed.origins.some((o, i) => o !== config.indexes[i]!.origin))) throw new Error();
   } catch { throw new Error('invalid coverage configuration'); }
-  const domain = config.provenance.domain, observation = config.observation;
+  const domain = (config.checkpoint ?? config.provenance).domain, observation = config.observation;
   const work = borrowed ?? createRankingReadBudget({ origins: [config.indexes[0].origin, config.indexes[1].origin], ...(signal ? { signal } : {}) });
   const pairs: CoveragePair[] = config.agentIds.flatMap((agentId) => config.reviewers.map((reviewer) => ({ agentId, reviewer,
     status: 'unknown', lastIndex: null, slots: [], missingSlots: [], diagnostics: [] })));
   const result: AcceptedReviewerCoverage = { status: 'unknown', qualification: 'rpc-derived-not-state-proof', domain,
     observation: { blockNumber: observation.blockNumber.toString(), blockHash: observation.blockHash },
-    activation: null, batchBasis: 'unavailable', pairs, acquisitions: [], rows: [], documents: [], diagnostics: [], budget: work.snapshot() };
+    activation: null, checkpoint: null, privateCheckpointLedger: null,
+    batchBasis: 'unavailable', pairs, acquisitions: [], rows: [], documents: [], diagnostics: [], budget: work.snapshot() };
   const check = () => { signal?.throwIfAborted(); work.check(); };
   async function scoped<T>(lane: RankingReadLane, run: (client: PublicClient, signal: AbortSignal) => Promise<T>, invocationSignal?: AbortSignal): Promise<T> {
     check();
@@ -199,30 +234,48 @@ export async function readAcceptedReviewerCoverage(input: AcceptedReviewerCovera
   }
   let before = false;
   try {
-    result.activation = await scoped('shared', (client, signal) => readReputationActivation({ client, signal,
-      provenance: config.provenance, observation, limits: { totalTimeoutMs: 60_000 } }));
-    if (result.activation.activation !== 'matched' || !result.activation.knownDeployment) {
-      result.diagnostics.push('known-deployment-unavailable'); return result;
+    if (config.checkpoint) {
+      // This must remain the first await, so the reader snapshots caller-owned
+      // card/wire bytes before the outer consumer yields control.
+      const acquired = await readFreshPairZeroCheckpoint({ ...config.checkpoint,
+        parentBudget: work.requestBudget('shared', 'rpc'), ...(signal ? { signal } : {}) });
+      result.checkpoint = acquired.finding; result.privateCheckpointLedger = acquired.ledger;
+      if (acquired.finding.status !== 'matched') { result.diagnostics.push('pair-zero-checkpoint-unavailable'); return result; }
+      result.observation.blockTimestamp = acquired.finding.observation.blockTimestamp;
+      for (const pair of pairs) {
+        const qualified = acquired.finding.qualifiedPairs.find((p) => p.agentId === pair.agentId && same(p.reviewer, pair.reviewer))!;
+        pair.lastIndex = qualified.lastIndex;
+        pair.slots = qualified.slots.map((observation) => ({ observation, sources: [] }));
+      }
+      await bracket(); before = true;
+      // Slots come from authenticated post-C logs, not Index history. Fetch only
+      // their exact document hashes below; never import old clients/responses.
+    } else {
+      result.activation = await scoped('shared', (client, signal) => readReputationActivation({ client, signal,
+        provenance: config.provenance, observation, limits: { totalTimeoutMs: 60_000 } }));
+      if (result.activation.activation !== 'matched' || !result.activation.knownDeployment) {
+        result.diagnostics.push('known-deployment-unavailable'); return result;
+      }
+      await bracket(); before = true;
+      let total = 0n;
+      for (const pair of pairs) {
+        try {
+          const value = await scoped('shared', async (client) => {
+            const data = await client.request({ method: 'eth_call', params: [{ to: domain.reputationRegistry,
+              data: encodeFunctionData({ abi: reputationRegistryAbi, functionName: 'getLastIndex', args: [BigInt(pair.agentId), pair.reviewer] }) },
+            numberToHex(observation.blockNumber)] }, { retryCount: 0 });
+            if (typeof data !== 'string' || data.length !== 66) throw new Error();
+            const [n] = decodeAbiParameters(counterParameters, data);
+            if (!same(encodeAbiParameters(counterParameters, [n]), data)) throw new Error(); return n;
+          });
+          pair.lastIndex = value.toString(); total += value;
+          if (value > 32n) pair.diagnostics.push('pair-counter-over-limit');
+        } catch { pair.diagnostics.push('counter-unavailable'); }
+      }
+      if (total > 512n) {
+        result.diagnostics.push('total-counter-over-limit'); for (const pair of pairs) pair.diagnostics.push('total-counter-over-limit');
+      } else await Promise.all([originWorker(0), originWorker(1)]);
     }
-    await bracket(); before = true;
-    let total = 0n;
-    for (const pair of pairs) {
-      try {
-        const value = await scoped('shared', async (client) => {
-          const data = await client.request({ method: 'eth_call', params: [{ to: domain.reputationRegistry,
-            data: encodeFunctionData({ abi: reputationRegistryAbi, functionName: 'getLastIndex', args: [BigInt(pair.agentId), pair.reviewer] }) },
-          numberToHex(observation.blockNumber)] }, { retryCount: 0 });
-          if (typeof data !== 'string' || data.length !== 66) throw new Error();
-          const [n] = decodeAbiParameters(counterParameters, data);
-          if (!same(encodeAbiParameters(counterParameters, [n]), data)) throw new Error(); return n;
-        });
-        pair.lastIndex = value.toString(); total += value;
-        if (value > 32n) pair.diagnostics.push('pair-counter-over-limit');
-      } catch { pair.diagnostics.push('counter-unavailable'); }
-    }
-    if (total > 512n) {
-      result.diagnostics.push('total-counter-over-limit'); for (const pair of pairs) pair.diagnostics.push('total-counter-over-limit');
-    } else await Promise.all([originWorker(0), originWorker(1)]);
     for (const pair of pairs) {
       pair.slots.sort((a, b) => Number(BigInt(a.observation.event!.feedbackIndex) - BigInt(b.observation.event!.feedbackIndex)));
       if (pair.lastIndex !== null && BigInt(pair.lastIndex) <= 32n) {

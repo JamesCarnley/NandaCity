@@ -25,12 +25,45 @@ const result = await readAcceptedReviewerCoverage({
 });
 ```
 
-Provenance is the exact configuration returned by the owned deployment helper,
+In the default direct-start path, provenance is the exact configuration returned by the owned deployment helper,
 not a previously successful activation finding. The adapter calls the independent
 activation reader again. Configuration is bounded and copied before awaiting I/O.
 Fresh clients use no retries, HTTP or multicall batching, fallback or response
 caching. The observation hash is read before counters and after all coverage work.
 An unavailable/changed final observation makes the batch unknown.
+
+### Explicit fresh-pair checkpoint path
+
+Instead of `provenance`, callers may supply `checkpoint`: the raw
+[`fresh-pair-zero-v1` configuration](pair-zero-checkpoint.md), excluding its
+`signal` and `parentBudget` fields. The two starts are mutually exclusive;
+asserted successful findings are not inputs. No checkpoint, public RPC or trusted
+pin is selected by default. Other coverage RPC/Index origins remain loopback-only.
+
+The checkpoint domain and numbered/hash-qualified B must match the coverage
+configuration, and its pair set must equal the exact selected agent/reviewer
+cross-product. The independent checkpoint reader authenticates A, registration,
+end-of-block zero C, continuity and each post-C slot through B. Its authenticated
+logs supply `pairs[].slots` even when both Indexes have no history. This path
+reads only those document hashes from the Indexes; it does not import Index
+history, pre-C clients, response lists or inherited response metadata. Empty
+`sources` means no Index row established the slot, not missing chain coverage.
+
+`activation` is null on this path; `checkpoint` retains the full independently
+read finding, including domain, A/C/B, pins, registration/admin bases, exact
+qualified pairs, diagnostics and raw evidence references. Conversely the direct
+path has `checkpoint: null`. `privateCheckpointLedger` is the explicit private
+acquisition output (null for direct starts). It contains bounded untrusted
+provider replies, not sanitized export data; keeping or exporting it is an
+explicit caller action. Never serialize it into a public report sidecar.
+
+Checkpoint acquisition borrows `work.requestBudget('shared', 'rpc')`. Each
+physical RPC charges that shared budget once, in addition to the checkpoint's
+own ceilings. Lower checkpoint limits do not increase the parent allowance.
+Cards and fixture wire bytes are snapshotted by the checkpoint reader before
+the coverage call first yields. Missing slots, failed final hash checks or either
+budget's exhaustion yield unknown coverage, never a smaller qualified pair set.
+Documents and private historical eligibility remain separate from slot coverage.
 
 - `status` and each pair's `status` describe publication-slot coverage only.
   Missing necessary slots, contradictory authenticated coordinates/counters,
@@ -82,10 +115,9 @@ Standalone coverage creates/disposes one `RankingReadBudget`. A composition can
 create it once and pass it as the second argument; coverage borrows it and does
 not reset or dispose it. The borrowed origin bindings must match exactly.
 
-Future qualification can use the **same live ledger** for current profiles,
-historical private-bundle reads and authority intervals, then perform its own final
-post-qualification observation recheck and dispose the ledger. That composition
-and qualification are not implemented here. A serialized result or snapshot is
+The [ranking composer](ranking-evidence.md) uses the **same live budget** for current profiles,
+historical private-bundle reads and authority intervals, then performs its own final
+post-qualification observation recheck and disposes the budget. A serialized result or snapshot is
 not a fresh read or a resumable budget. Private bundle bytes must be charged once
 before copy/decode; already charged public documents need no second byte charge.
 

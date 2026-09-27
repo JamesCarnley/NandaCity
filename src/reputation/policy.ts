@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { Address, Hex } from 'viem';
 import { compare, scoreGroups, selectLatestByPair, WINDOW_SECONDS } from './engine.js';
 import type { Rational } from './engine.js';
 export type { Rational } from './engine.js';
@@ -33,6 +34,16 @@ const admissionFields = {
   id: key, service: key, issuer: key, city: key, task: key,
   status: z.enum(['valid', 'invalid', 'unknown']), provenance,
 };
+const historyFields = { id: key, status: z.enum(['complete', 'partial', 'unavailable']), startBlock: block,
+  observation: key, provenance };
+const checkpointAddress = z.string().regex(/^0x[0-9a-f]{40}$/).refine((s) => !/^0x0{40}$/.test(s)).transform((s) => s as Address);
+const checkpointHash = digest.transform((s) => s as Hex);
+const pairZeroHistorySchema = z.strictObject({ ...historyFields, start: z.literal('pair-zero-checkpoint-confirmed'),
+  checkpoint: z.strictObject({ domain: z.strictObject({ chainId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    genesisHash: checkpointHash, identityRegistry: checkpointAddress, reputationRegistry: checkpointAddress }),
+  zeroBasis: z.strictObject({ blockNumber: block, blockHash: checkpointHash }),
+  pairs: z.array(z.strictObject({ agentId: block, reviewer: checkpointAddress })).min(1).max(48) }) });
+export type PairZeroPolicyHistory = z.infer<typeof pairZeroHistorySchema>;
 const inputSchema = z.strictObject({
   policy: z.strictObject({
     id: key, version: key, reviewers: z.array(key).max(256),
@@ -49,10 +60,7 @@ const inputSchema = z.strictObject({
     profile: z.strictObject({
       id: key, status: z.enum(['valid', 'invalid', 'inactive', 'unknown']), endpoint: key.nullable(), cardDigest: digest.nullable(), provenance,
     }),
-    history: z.strictObject({
-      id: key, status: z.enum(['complete', 'partial', 'unavailable']), startBlock: block,
-      start: z.enum(['registry-start-confirmed', 'unproven']), observation: key, provenance,
-    }),
+    history: z.union([z.strictObject({ ...historyFields, start: z.enum(['registry-start-confirmed', 'unproven']) }), pairZeroHistorySchema]),
   })).max(64),
   reviews: z.array(reviewSchema).max(2048),
   admissions: z.array(z.discriminatedUnion('kind', [
@@ -68,7 +76,7 @@ export type ReviewReason =
   | 'contributing' | 'sample-cap' | 'superseded' | 'duplicate-publication'
   | 'revoked' | 'aged-out' | 'retired-authority' | 'unknown-evidence' | 'unresolved-revision'
   | 'invalid-evidence' | 'reviewer-not-accepted' | 'scope-mismatch' | 'service-not-in-candidates'
-  | 'noncanonical' | 'after-observation' | 'future-publication' | 'publication-projection-mismatch';
+  | 'noncanonical' | 'after-observation' | 'future-publication' | 'publication-projection-mismatch' | 'before-checkpoint';
 type ReviewExplanation = {
   id: string; documentDigest: string; reviewer: string | null; interaction: string | null;
   reason: ReviewReason; anchor: string | null; provenance: Review['provenance'];
@@ -200,6 +208,19 @@ function parse(input: unknown): PolicyInput {
     if (candidate.history.status === 'complete' && candidate.history.start === 'registry-start-confirmed' &&
         parsed.reviews.some((review) => review.service === candidate.service && review.publication.domain === parsed.observation.domain &&
           review.publication.canonical === 'canonical' && BigInt(review.publication.block) < BigInt(candidate.history.startBlock))) throw new Error('canonical publication predates claimed registry start');
+    if (candidate.history.start === 'pair-zero-checkpoint-confirmed') {
+      const { domain, zeroBasis, pairs } = candidate.history.checkpoint;
+      if (candidate.history.startBlock !== zeroBasis.blockNumber || domain.identityRegistry === domain.reputationRegistry ||
+        parsed.observation.domain !== `eip155:${domain.chainId}/erc8004:${domain.reputationRegistry}` ||
+        pairs.some((pair) => candidate.service !== `eip155:${domain.chainId}/erc721:${domain.identityRegistry}/${pair.agentId}` ||
+          !policy.reviewers.includes(pair.reviewer))) throw new Error('checkpoint scope mismatch');
+      unique(pairs.map((pair) => pair.reviewer), 'checkpoint reviewer');
+      pairs.sort((a, b) => compare(a.reviewer, b.reviewer));
+      if (candidate.history.status === 'complete' && pairs.length !== policy.reviewers.length) throw new Error('incomplete checkpoint reviewer scope');
+      if (candidate.history.status === 'complete' && parsed.reviews.some((review) => review.service === candidate.service &&
+        review.publication.domain === parsed.observation.domain && review.publication.canonical === 'canonical' &&
+        BigInt(review.publication.block) <= BigInt(zeroBasis.blockNumber))) throw new Error('canonical publication is not after checkpoint');
+    }
   }
   policy.reviewers.sort(compare); policy.curators.sort(compare); policy.evaluators.sort(compare);
   policy.groups.sort((a, b) => compare(a.key, b.key)).forEach((group) => group.reviewers.sort(compare));
@@ -252,12 +273,15 @@ type Anchor = { review: Review; unknown: boolean };
 function selectReviews(input: PolicyInput, candidate: Candidate, byId: Map<string, ReviewExplanation>): {
   eligible: Review[]; unresolved: boolean; priorExcluded: boolean;
 } {
-  let unresolved = candidate.history.status !== 'complete' || candidate.history.start !== 'registry-start-confirmed' ||
+  let unresolved = candidate.history.status !== 'complete' || candidate.history.start === 'unproven' ||
     candidate.history.observation !== input.observation.id;
   let priorExcluded = false;
   const documents = new Map<string, Review[]>();
   for (const review of input.reviews.filter((item) => item.service === candidate.service)) {
-    const exclusion = initialExclusion(input, review);
+    const checkpoint = candidate.history.start === 'pair-zero-checkpoint-confirmed' ? candidate.history.checkpoint : undefined;
+    const exclusion = checkpoint && BigInt(review.publication.block) <= BigInt(checkpoint.zeroBasis.blockNumber) ? 'before-checkpoint' :
+      checkpoint && review.reviewer !== null && !checkpoint.pairs.some((pair) => pair.reviewer === review.reviewer) ? 'scope-mismatch' :
+        initialExclusion(input, review);
     if (exclusion) { byId.get(review.id)!.reason = exclusion; byId.get(review.id)!.anchor = null; continue; }
     const publications = documents.get(review.documentDigest) ?? [];
     publications.push(review); documents.set(review.documentDigest, publications);

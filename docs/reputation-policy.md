@@ -108,11 +108,33 @@ The calculator checks consistency of supplied findings, not their chain authorit
 
 `history` must cover canonical publication **and revocation**, from the declared
 registry deployment/start block through the exact observation ID. A complete
-finding requires `start: registry-start-confirmed`; `unproven`, partial, unavailable
+direct-start finding requires `start: registry-start-confirmed`; `unproven`, partial, unavailable
 or wrong-observation coverage withholds qualified rank. A claimed confirmed start
 after an included canonical publication is contradictory and rejects. This
 coverage requirement is independent of the 90-day scoring window. An adapter must
 not retrieve only recent publications and call the resulting history complete.
+
+An alternative Ethereum-only `PairZeroPolicyHistory` uses
+`start: pair-zero-checkpoint-confirmed`, with `startBlock` equal to C and a required
+`checkpoint: { domain, zeroBasis: { blockNumber, blockHash }, pairs }`.
+The full domain includes chain ID, genesis hash and both registry addresses.
+Each pair contains `agentId` and lowercase reviewer address. For that candidate,
+the service must be `eip155:<chainId>/erc721:<identityRegistry>/<agentId>` and the
+observation domain must be `eip155:<chainId>/erc8004:<reputationRegistry>`.
+Only the candidate's named pairs belong in this history; complete scope requires
+every accepted reviewer exactly once, with no unnamed or duplicate reviewer.
+The genesis/hash authority is established by the adapter, not by the calculator's
+opaque observation ID. The observation ID must still match exactly to qualify.
+
+This means complete **post-C history for these pairs only**, not registry-wide or
+pre-C completeness. A canonical publication at or before C contradicts a complete
+checkpoint history and rejects. With partial/unavailable checkpoint history,
+such publications have reason `before-checkpoint` and cannot contribute, even
+provisionally. An unnamed pair cannot contribute either. Post-B publications,
+missing document/private-bundle findings and unknown or retired epochs retain
+the existing exclusions and unresolved behavior. Slot completeness never supplies
+signature, private authority, contribution or semantic-quality findings.
+The direct-start and origin policies are unchanged.
 
 ## Selection and exact arithmetic
 

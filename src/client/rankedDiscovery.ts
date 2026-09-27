@@ -10,7 +10,7 @@ import type { AgentRef, VerifiedProfile } from '../identity/verify.js';
 import { readRankingEvidence, type RankingEvidenceInput, type RankingEvidenceRead } from '../reputation/evidence.js';
 import { exactLoopbackOrigin, filterForCity, type City } from './externalClient.js';
 
-export type RankedDiscoveryInput = Omit<RankingEvidenceInput, 'services'> & Readonly<{
+export type RankedDiscoveryInput = Omit<Extract<RankingEvidenceInput, { checkpoint?: never }>, 'services'> & Readonly<{
   city: City;
   townBundles?: readonly Readonly<{ agent: AgentRef; directory: string }>[];
 }>;

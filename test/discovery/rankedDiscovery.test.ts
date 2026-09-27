@@ -157,7 +157,7 @@ async function fixture(rows: [Row[], Row[]], options: { reorg?: boolean; stall?:
   const domain = { chainId: 31337, genesisHash: hash('c'), identityRegistry: registry, reputationRegistry: reputation };
   const tx = { transactionHash: hash('d'), blockNumber: '2', blockHash: frozenHash, transactionIndex: 0 };
   const creation = { ...tx, address: address('4'), nonce: '0', runtimeCodeHash: hash('e') };
-  const input: Omit<RankingEvidenceInput, 'services'> & { city: 'Chicago' } = {
+  const input: RankedDiscoveryInput & { city: 'Chicago' } = {
     city: 'Chicago', rpcOrigin: rpc.origin, cardOrigin: card.origin,
     identityDomain: { chainId: 31337, registry, genesisHash: hash('c'), knownImplementation: { address: address('5'), codeHash: hash('e') } },
     observation: { blockNumber: 4n, blockHash: frozenHash },

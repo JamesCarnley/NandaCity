@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { FeedbackIndexSource } from '../feedback/indexClient.js';
 import { readFeedbackCarryForward, readHistoricalFeedback, type FeedbackCarryForwardObservation,
   type HistoricalFeedbackObservation } from '../feedback/historicalRead.js';
-import type { ReputationDeploymentProvenance } from '../feedback/reputationActivation.js';
+import type { CheckpointRpcLedger, FreshPairZeroObservation } from '../feedback/pairZeroCheckpoint.js';
 import { decodeSupportingBundle, type SupportingBundle } from '../feedback/supportingBundle.js';
 import { continuityLimits, readIdentityFeedbackEpoch, type IdentityContinuityDomain } from '../identity/continuity.js';
 import { decodeRegistration } from '../identity/profile.js';
@@ -18,15 +18,14 @@ import { ownedFetch } from '../demo/ownedLifecycle.js';
 import { readPrivateBundleFile } from '../demo/privateBundleFile.js';
 import { cityRequestEnvelopeFromParams, sendParamsSchema } from '../a2a/wire.js';
 import { decodeEnvelope } from '../interaction/signatures.js';
-import { readAcceptedReviewerCoverage, type AcceptedReviewerCoverage } from './coverage.js';
+import { checkpointConfigurationSchema, readAcceptedReviewerCoverage, type AcceptedReviewerCoverage, type CoverageStart } from './coverage.js';
 import { calculatePolicy, type PolicyInput, type PolicyResult } from './policy.js';
 import { createRankingReadBudget, type RankingReadBudget, type RankingReadBudgetSnapshot } from './readBudget.js';
 import { qualifyTownTestAdmission, readTownEvidence, type TownEvidenceRuntime,
   type TownEvidenceObservation } from './townEvidence.js';
 
-export type RankingEvidenceInput = Readonly<{
+export type RankingEvidenceInput = Readonly<CoverageStart & {
   rpcOrigin: string;
-  provenance: ReputationDeploymentProvenance;
   identityDomain: IdentityContinuityDomain;
   cardOrigin: string;
   observation: Readonly<{ blockNumber: bigint; blockHash: Hex }>;
@@ -44,6 +43,7 @@ export type RankingEvidenceSidecar = Readonly<{
   coverage: Readonly<{
     status: 'complete' | 'unknown';
     activation: 'matched' | 'mismatched' | 'unsupported' | 'unavailable' | null;
+    checkpoint: FreshPairZeroObservation | null;
     pairs: readonly Readonly<{ service: string; reviewer: Address; status: 'complete' | 'unknown';
       lastIndex: string | null; missingSlots: readonly string[]; codes: readonly string[] }>[];
     acquisitions: readonly Readonly<{ origin: 0 | 1; pair: number;
@@ -86,6 +86,8 @@ export type RankingEvidenceRead = Readonly<{
   policyInput: PolicyInput | null;
   policyResult: PolicyResult | null;
   sidecar: RankingEvidenceSidecar;
+  /** Explicit private raw acquisition; do not export with the public sidecar. */
+  privateCheckpointLedger: CheckpointRpcLedger | null;
   diagnostics: readonly string[];
   budget: RankingReadBudgetSnapshot;
 }>;
@@ -134,8 +136,8 @@ const policySchema = z.strictObject({ id: key, version: key,
   reviewers: z.array(address).max(8),
   groups: z.array(z.strictObject({ key, reviewers: z.array(address).min(1).max(8) })).max(8),
   curators: z.array(key).max(256), evaluators: z.array(key).max(256) });
-const inputSchema = z.strictObject({
-  rpcOrigin, provenance: provenanceSchema, identityDomain: identityDomainSchema, cardOrigin: loopbackOrigin,
+const inputBase = z.strictObject({
+  rpcOrigin, identityDomain: identityDomainSchema, cardOrigin: loopbackOrigin,
   observation: z.strictObject({ blockNumber: z.bigint().min(0n).max((1n << 256n) - 1n), blockHash: hash }),
   indexes: z.tuple([z.strictObject({ origin: rpcOrigin, source: indexSourceSchema }),
     z.strictObject({ origin: rpcOrigin, source: indexSourceSchema })]),
@@ -146,6 +148,10 @@ const inputSchema = z.strictObject({
   curatorInclusions: z.array(z.strictObject({ curator: key, agent: agentSchema })).max(512).optional(),
   townRuntime: z.strictObject({ checkout: absolutePath, python: absolutePath }).optional(),
 });
+const inputSchema = z.union([
+  inputBase.extend({ provenance: provenanceSchema, checkpoint: z.never().optional() }),
+  inputBase.extend({ checkpoint: checkpointConfigurationSchema, provenance: z.never().optional() }),
+]);
 
 type Config = z.output<typeof inputSchema> & { signal?: AbortSignal };
 const same = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase();
@@ -158,7 +164,7 @@ function copyConfiguration(input: RankingEvidenceInput): Config {
     const { signal, ...raw } = input;
     if (signal !== undefined && !(signal instanceof AbortSignal)) throw new Error();
     const config = inputSchema.parse(raw);
-    const domain = config.provenance.domain;
+    const domain = (config.checkpoint ?? config.provenance).domain;
     if (config.indexes[0].origin === config.indexes[1].origin ||
       config.identityDomain.chainId !== domain.chainId ||
       !same(config.identityDomain.registry, domain.identityRegistry) ||
@@ -170,6 +176,15 @@ function copyConfiguration(input: RankingEvidenceInput): Config {
     const services = config.services.map(({ agent }) => serviceKey(agent));
     if (new Set(services).size !== services.length || config.services.some(({ agent }) =>
       agent.chainId !== config.identityDomain.chainId || !same(agent.registry, config.identityDomain.registry))) throw new Error();
+    if (config.checkpoint) {
+      const c = config.checkpoint;
+      const expected = new Set(config.services.flatMap(({ agent }) => config.policy.reviewers.map((reviewer) => `${agent.agentId}:${reviewer}`)));
+      if (c.observation.blockNumber !== config.observation.blockNumber || !same(c.observation.blockHash, config.observation.blockHash) ||
+        !same(c.pins.identity.implementation, config.identityDomain.knownImplementation.address) ||
+        !same(c.pins.identity.fullRuntimeHash, config.identityDomain.knownImplementation.codeHash) ||
+        c.pairs.length !== expected.size || new Set(c.pairs.map((p) => `${p.agentId}:${p.reviewer}`)).size !== expected.size ||
+        c.pairs.some((p) => !expected.has(`${p.agentId}:${p.reviewer}`))) throw new Error();
+    }
     if (new Set(config.policy.reviewers).size !== config.policy.reviewers.length ||
       new Set(config.policy.curators).size !== config.policy.curators.length ||
       new Set(config.policy.evaluators).size !== config.policy.evaluators.length ||
@@ -201,6 +216,7 @@ function sanitizeCoverage(coverage: AcceptedReviewerCoverage): RankingEvidenceSi
   return {
     status: coverage.status,
     activation: coverage.activation?.activation ?? null,
+    checkpoint: coverage.checkpoint ? structuredClone(coverage.checkpoint) : null,
     pairs: coverage.pairs.map((pair) => ({ service: service(pair.agentId), reviewer: pair.reviewer,
       status: pair.status, lastIndex: pair.lastIndex, missingSlots: [...pair.missingSlots],
       codes: pair.diagnostics.map(diagnosticCode) })),
@@ -362,8 +378,17 @@ function historyFor(state: ServiceState, coverage: AcceptedReviewerCoverage,
   qualificationGap: boolean): PolicyInput['candidates'][number]['history'] {
   const activation = coverage.activation?.activation === 'matched' ? coverage.activation.knownDeployment?.activation : undefined;
   const pairs = coverage.pairs.filter((pair) => pair.agentId === state.agent.agentId);
-  const complete = !!activation && coverage.status === 'complete' &&
+  const checkpoint = coverage.checkpoint?.status === 'matched' ? coverage.checkpoint : undefined;
+  const complete = (!!activation || !!checkpoint) && coverage.status === 'complete' &&
     pairs.length === acceptedReviewerCount && pairs.every((pair) => pair.status === 'complete') && !qualificationGap;
+  if (checkpoint) return {
+    id: evidenceId('history', [state.service, observationId]),
+    status: complete ? 'complete' : coverage.batchBasis === 'matched' ? 'partial' : 'unavailable',
+    startBlock: checkpoint.zeroBasis.blockNumber, start: 'pair-zero-checkpoint-confirmed',
+    observation: observationId, provenance: 'adapter-observed',
+    checkpoint: { domain: { ...checkpoint.domain }, zeroBasis: { ...checkpoint.zeroBasis },
+      pairs: pairs.map(({ agentId, reviewer }) => ({ agentId, reviewer })) },
+  };
   return {
     id: evidenceId('history', [state.service, observationId]),
     status: complete ? 'complete' : coverage.batchBasis === 'matched' ? 'partial' : 'unavailable',
@@ -558,7 +583,7 @@ async function readReviews(config: Config, work: RankingReadBudget, coverage: Ac
     } catch { bytes = null; bundleState = 'rejected'; codes.push('private-bundle-rejected'); }
     try {
       const readInput = { client: guardedClient(createClient(config, work), config.observation),
-        domain: config.provenance.domain,
+        domain: (config.checkpoint ?? config.provenance).domain,
         eventRef: { blockNumber: source.blockNumber, blockHash: source.blockHash,
           transactionHash: source.transactionHash, transactionIndex: source.transactionIndex,
           logIndex: source.logIndex, feedbackURI: rawText(event.feedbackURIBytes, 2_048) },
@@ -704,13 +729,14 @@ export async function readRankingEvidence(input: RankingEvidenceInput): Promise<
   let coverage: AcceptedReviewerCoverage | undefined;
   try {
     coverage = await readAcceptedReviewerCoverage({ rpcOrigin: config.rpcOrigin,
-      provenance: config.provenance, observation: config.observation,
+      ...(config.checkpoint ? { checkpoint: config.checkpoint } : { provenance: config.provenance }), observation: config.observation,
       agentIds: config.services.map(({ agent }) => agent.agentId), reviewers: config.policy.reviewers,
       indexes: config.indexes, ...(config.signal ? { signal: config.signal } : {}) }, work);
     const states: ServiceState[] = [];
     for (const selected of config.services) states.push(await readCurrentService(config, work, selected));
     const observationId = `observation:${config.observation.blockHash}`;
-    const observationDomain = `eip155:${config.provenance.domain.chainId}/erc8004:${config.provenance.domain.reputationRegistry}`;
+    const domain = (config.checkpoint ?? config.provenance).domain;
+    const observationDomain = `eip155:${domain.chainId}/erc8004:${domain.reputationRegistry}`;
     const observedTimestamp = coverage.observation.blockTimestamp;
     const observationTimestamp = observedTimestamp && /^(0|[1-9][0-9]*)$/.test(observedTimestamp) &&
       BigInt(observedTimestamp) <= 253_402_300_799n ? Number(observedTimestamp) : 0;
@@ -762,7 +788,7 @@ export async function readRankingEvidence(input: RankingEvidenceInput): Promise<
     return { qualification: 'rpc-derived-not-state-proof', snapshot,
       policyInput: snapshot === 'matched' ? policyInput : null,
       policyResult: snapshot === 'matched' ? policyResult : null,
-      sidecar, diagnostics, budget };
+      sidecar, privateCheckpointLedger: coverage.privateCheckpointLedger, diagnostics, budget };
   } finally {
     clearTimeout(deadline); copied.signal?.removeEventListener('abort', cancel); await work.dispose();
   }

@@ -63,6 +63,97 @@ function reason(input: PolicyInput, id: string) {
   return result(input).reviews.find((r) => r.id === id)?.reason;
 }
 
+function pairZeroInput(): any {
+  const input: any = fixture();
+  const reviewer = '0x1111111111111111111111111111111111111111';
+  const domain = { chainId: 11155111, genesisHash: digest(0),
+    identityRegistry: '0x2222222222222222222222222222222222222222',
+    reputationRegistry: '0x3333333333333333333333333333333333333333' };
+  const service = `eip155:11155111/erc721:${domain.identityRegistry}/7`;
+  input.policy.reviewers = [reviewer]; input.policy.groups = [{ key: 'reviewer', reviewers: [reviewer] }];
+  input.observation.domain = `eip155:11155111/erc8004:${domain.reputationRegistry}`;
+  input.candidates[0].service = service; input.admissions[0].service = service;
+  input.candidates[0].history = { id: 'checkpoint-history', status: 'complete', startBlock: '100',
+    start: 'pair-zero-checkpoint-confirmed', observation: input.observation.id, provenance: 'supplied',
+    checkpoint: { domain, zeroBasis: { blockNumber: '100', blockHash: digest(100) }, pairs: [{ agentId: '7', reviewer }] } };
+  const r = review(1, { service, reviewer });
+  r.publication = { ...r.publication, domain: input.observation.domain, block: '101' };
+  input.reviews = [r]; return input;
+}
+
+test('pair-zero history qualifies only the explicit post-checkpoint service/reviewer scope', () => {
+  const input = pairZeroInput();
+  assert.equal(result(input).view, 'recommended-rated');
+  assert.deepEqual(result(input).score, { numerator: '11', denominator: '3' });
+  assert.deepEqual(result(input).history, input.candidates[0].history);
+  input.reviews = [];
+  assert.equal(result(input).view, 'recommended-newcomer');
+});
+
+test('pair-zero complete history rejects domain, service, reviewer and zero-basis substitution', () => {
+  const mutations: Array<(input: any) => void> = [
+    (v) => { v.candidates[0].history.checkpoint.pairs[0].agentId = '8'; },
+    (v) => { v.candidates[0].history.checkpoint.pairs[0].reviewer = '0x4444444444444444444444444444444444444444'; },
+    (v) => { v.candidates[0].history.checkpoint.domain.chainId = 1; },
+    (v) => { v.candidates[0].history.checkpoint.domain.identityRegistry = '0x4444444444444444444444444444444444444444'; },
+    (v) => { v.candidates[0].history.checkpoint.domain.reputationRegistry = '0x4444444444444444444444444444444444444444'; },
+    (v) => { v.candidates[0].history.checkpoint.zeroBasis.blockNumber = '99'; },
+    (v) => { v.candidates[0].history.startBlock = '1001'; v.candidates[0].history.checkpoint.zeroBasis.blockNumber = '1001'; },
+    (v) => { v.candidates[0].history.checkpoint.pairs.push(v.candidates[0].history.checkpoint.pairs[0]); },
+    (v) => { v.candidates[0].history.checkpoint.pairs = []; },
+  ];
+  for (const mutate of mutations) { const input = pairZeroInput(); mutate(input); assert.throws(() => calculatePolicy(input)); }
+  const wrongObservation = pairZeroInput(); wrongObservation.candidates[0].history.observation = 'different-B';
+  assert.equal(result(wrongObservation).view, 'recommended-unresolved');
+  const unnamed = pairZeroInput(); unnamed.policy.reviewers.push('0x4444444444444444444444444444444444444444');
+  unnamed.policy.groups.push({ key: 'other', reviewers: [unnamed.policy.reviewers[1]] });
+  assert.throws(() => calculatePolicy(unnamed));
+});
+
+test('pair-zero history never recycles a canonical publication at or before C', () => {
+  for (const block of ['99', '100']) {
+    const input = pairZeroInput(); input.reviews[0].publication.block = block;
+    assert.throws(() => calculatePolicy(input), /checkpoint/);
+    input.candidates[0].history.status = 'partial';
+    assert.equal(result(input).score, null);
+    assert.equal(result(input).interactionCount, 0);
+    assert.equal(result(input).reviews[0]?.reason, 'before-checkpoint');
+  }
+});
+
+test('pair-zero coverage does not replace missing documents, private authority or epoch qualification', () => {
+  for (const mutate of [
+    (v: any) => { v.candidates[0].history.status = 'partial'; },
+    (v: any) => { v.reviews[0].checks.feedbackSignature = 'unknown'; v.reviews[0].rating = null; },
+    (v: any) => { v.reviews[0].checks.originalAuthority = 'unknown'; },
+    (v: any) => { v.reviews[0].historyQualification = 'unknown'; },
+  ]) {
+    const input = pairZeroInput(); mutate(input);
+    assert.equal(result(input).view, 'recommended-unresolved'); assert.equal(result(input).score, null);
+  }
+  const retired = pairZeroInput(); retired.reviews[0].epoch = 'retired';
+  assert.equal(result(retired).reviews[0]?.reason, 'retired-authority');
+  assert.equal(result(retired).view, 'recommended-unassessed');
+});
+
+test('partial checkpoint history cannot assign even provisional weight to an unnamed pair', () => {
+  const input = pairZeroInput(), reviewer = '0x4444444444444444444444444444444444444444';
+  input.candidates[0].history.status = 'partial';
+  input.policy.reviewers.push(reviewer); input.policy.groups.push({ key: 'other', reviewers: [reviewer] });
+  input.reviews[0].reviewer = reviewer;
+  assert.equal(result(input).provisionalScore, null);
+  assert.equal(result(input).reviews[0]?.reason, 'scope-mismatch');
+});
+
+test('checkpoint pair declaration order cannot change the canonical policy output', () => {
+  const input = pairZeroInput(), reviewer = '0x4444444444444444444444444444444444444444';
+  input.policy.reviewers.push(reviewer); input.policy.groups.push({ key: 'other', reviewers: [reviewer] });
+  input.candidates[0].history.checkpoint.pairs.push({ agentId: '7', reviewer });
+  const expected = calculatePolicy(input);
+  input.candidates[0].history.checkpoint.pairs.reverse();
+  assert.deepEqual(calculatePolicy(input), expected);
+});
+
 test('only explicit committed runtime history bypasses retirement without changing age or revocation', () => {
   const input = fixture();
   const first = review(1, { epoch: 'retired', rating: 1,
