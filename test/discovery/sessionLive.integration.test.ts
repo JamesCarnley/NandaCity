@@ -311,40 +311,61 @@ test('owned licensed session keeps real source-backed answers transient and dura
   assert.ok(JSON.parse(await readFile(join(options.budgetDirectory, 'budget.json'), 'utf8')).runs.length >= 9);
 });
 
-test('source and non-cooperative inference resets fence generations and never renew the shared allowance', { timeout: 300000 }, async (t) => {
+// Three generations each acquire three real Safe operators and two Indexes.
+// Budget their setup separately from the bounded cancellation barriers below.
+test('source and non-cooperative inference resets fence generations and never renew the shared allowance', { timeout: 480000 }, async (t) => {
+  const started = performance.now();
+  const checkpoint = (label: string) => t.diagnostic(`${label} at ${Math.round(performance.now() - started)}ms`);
+  const boundedBarrier = async (pending: Promise<void>, label: string, timeoutMs = 5000) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([pending, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} did not settle within ${timeoutMs}ms`)), timeoutMs);
+      })]);
+      checkpoint(label);
+    } finally { clearTimeout(timer); }
+  };
   const { options, calls } = await setup(t); options.budget.sessionCapMicros = '16';
   const reviewer = 'new' as const;
   const barrier = () => {
     let release!: () => void; const promise = new Promise<void>((resolve) => { release = resolve; }); return { promise, release };
   };
   await withDemoSession(process.env.NANDA_INDEX_CHECKOUT!, async (session) => {
-    await session.ready(); await select(session, 'Chicago');
+    checkpoint('generation 0 acquisition started');
+    await session.ready(); checkpoint('generation 0 ready'); await select(session, 'Chicago');
     const arrived = barrier(), held = barrier(), disconnected = barrier();
     calls.sourceGate = async () => { arrived.release(); await held.promise; }; calls.sourceClosed = disconnected.release;
     assert.throws(() => session.start({ kind: 'invoke', reviewer: 'accepted', input: inputFor('Chicago') }));
     session.start({ kind: 'invoke', reviewer, input: inputFor('Chicago') }, 'source-reset');
     await arrived.promise;
+    checkpoint('source barrier reached');
     const reset = session.reset();
-    try { await disconnected.promise; assert.equal(session.readContent('source-reset', 0), undefined); }
+    try { await boundedBarrier(disconnected.promise, 'source transport physically closed'); assert.equal(session.readContent('source-reset', 0), undefined); }
     finally { held.release(); calls.sourceGate = undefined; calls.sourceClosed = undefined; await reset; }
+    checkpoint('source reset cleanup completed; generation 1 acquisition started');
     assert.equal(session.view().generation, 1); assert.deepEqual(session.view().invocations, []);
     assert.equal(calls.generated, 0);
-    await session.ready(); await select(session, 'Chicago');
+    await session.ready(); checkpoint('generation 1 ready'); await select(session, 'Chicago');
     const generating = barrier(), physical = barrier(), aborted = barrier(), observing = barrier();
     calls.generateGate = async (signal) => { signal.addEventListener('abort', aborted.release, { once: true }); generating.release(); await physical.promise; };
     session.start({ kind: 'invoke', reviewer, input: inputFor('Chicago') }, 'inference-reset');
     await generating.promise;
+    checkpoint('inference barrier reached');
     const settled = LiveBudget.prototype.settled;
     const observation = t.mock.method(LiveBudget.prototype, 'settled', async function (this: LiveBudget) { observing.release(); return settled.call(this); });
     let complete = false; const second = session.reset().then(() => { complete = true; });
     try {
-      await aborted.promise; await observing.promise;
+      await boundedBarrier(aborted.promise, 'inference abort observed');
+      // stop() awaits the full Index/Docker/Anvil fixture teardown before ledger
+      // settlement. This is a cleanup budget, not an inference-abort guarantee.
+      await boundedBarrier(observing.promise, 'fixture teardown reached physical settlement wait', 60000);
       assert.equal(complete, false, 'logical cancellation cannot claim physical settlement');
       assert.equal(session.view().generation, 1); assert.equal(session.view().status, 'resetting');
       assert.equal(session.readContent('inference-reset', 1), undefined);
       await assert.rejects(LiveBudget.open(options.budgetDirectory, options.budget), /writer/);
     } finally { physical.release(); calls.generateGate = undefined; await second; observation.mock.restore(); }
-    assert.equal(session.view().generation, 2); await session.ready(); await select(session, 'Boston');
+    checkpoint('inference reset cleanup completed; generation 2 acquisition started');
+    assert.equal(session.view().generation, 2); await session.ready(); checkpoint('generation 2 ready'); await select(session, 'Boston');
     const sourceCount = calls.source;
     const invocation = session.start({ kind: 'invoke', reviewer, input: inputFor('Boston') }, 'budget-exhausted');
     assert.equal((await session.wait(invocation.id)).state, 'completed');
@@ -356,6 +377,7 @@ test('source and non-cooperative inference resets fence generations and never re
     assert.equal((await session.wait(session.start({ kind: 'feedback', invocationId: invocation.id, value: 1 }).id)).state, 'completed');
     assert.equal(session.view().feedback[0]!.weighting, 'reviewer-not-accepted', 'caller admission is not reviewer-policy acceptance');
     await session.close(); assert.equal(session.view().status, 'closed'); assert.deepEqual(session.view().invocations, []);
+    checkpoint('session close completed');
   }, { ...options, admittedReviewer: reviewer });
   assert.equal((await readdir(options.budgetDirectory)).includes('writer.lock'), false);
   const persisted = await readFile(join(options.budgetDirectory, 'budget.json'), 'utf8');

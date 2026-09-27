@@ -302,7 +302,12 @@ test('an unrelated viem failure is not hidden by concurrent session cancellation
   } finally { intercept.mock.restore(); }
 });
 
-for (const phase of ['onboarding', 'recovery'] as const) test(`reset closes the actual ${phase} Safe RPC and owned wallet child`, { timeout: 120000 }, async (t) => {
+// Recovery first acquires all three real Safe operators and both Indexes, then
+// exports the backup before reaching its RPC barrier. Keep that whole-test
+// budget separate from the unchanged one-second physical cancellation check.
+for (const phase of ['onboarding', 'recovery'] as const) test(`reset closes the actual ${phase} Safe RPC and owned wallet child`, { timeout: phase === 'recovery' ? 240000 : 120000 }, async (t) => {
+  const started = performance.now();
+  const checkpoint = (label: string) => t.diagnostic(`${phase}: ${label} at ${Math.round(performance.now() - started)}ms`);
   const { withDemoSession } = await import('../../src/demo/sessionController.js');
   let entered!: () => void; let disconnected!: () => void; let physicalClosed = false;
   const arrived = new Promise<void>((resolve) => { entered = resolve; });
@@ -350,17 +355,21 @@ for (const phase of ['onboarding', 'recovery'] as const) test(`reset closes the 
   syncBuiltinESMExports();
   try {
     await withDemoSession(process.env.NANDA_INDEX_CHECKOUT!, async (session) => {
+      checkpoint('fixture acquisition started');
       let work: Promise<unknown> = session.ready();
-      if (phase === 'recovery') { await work; armed = true;
+      if (phase === 'recovery') { await work; checkpoint('fixture ready; recovery starting'); armed = true;
         work = session.wait(session.start({ kind: 'recover', operatorId: session.view().operators[0]!.id }, 'held-recovery').id); }
       await Promise.race([arrived, work.then(() => { throw new Error('wallet work settled without the physical RPC barrier'); })]);
+      checkpoint('Safe RPC barrier reached');
       const child = wallet; let timer: ReturnType<typeof setTimeout> | undefined;
       const reset = session.reset(); armed = false;
       try {
         await Promise.race([closed, new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => reject(new Error('actual Safe RPC outlived caller cancellation')), 1000);
         })]);
+        checkpoint('Safe RPC physically closed');
         await reset; assert.equal(physicalClosed, true);
+        checkpoint('reset cleanup completed');
         assert.ok(child?.pid, 'actual wallet child was running at the RPC barrier');
         assert.throws(() => process.kill(child.pid!, 0), /ESRCH/);
         assert.equal(parentSafeRead, false, 'Safe internals must not run in the parent');
@@ -368,6 +377,7 @@ for (const phase of ['onboarding', 'recovery'] as const) test(`reset closes the 
       } catch (error) { barrierFailure = error; throw error; }
       finally { clearTimeout(timer); server.closeAllConnections(); await reset.catch((error) => { if (!barrierFailure) throw error; }); }
     });
+    checkpoint('session close completed');
   } catch (error) { throw barrierFailure ?? error;
   } finally {
     fetchProbe.mock.restore(); forkProbe.mock.restore(); syncBuiltinESMExports();
