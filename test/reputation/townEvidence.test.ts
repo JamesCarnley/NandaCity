@@ -277,11 +277,18 @@ test('qualifies a signed Town observation only after exact profile, card, endpoi
   const value = await admissionFixture();
   const result = await qualifyTownTestAdmission(value.input);
   assert.deepEqual(result, { admission: {
-    kind: 'test', id: `town-test:${value.observation.receipt.bundleFingerprint}`,
+    kind: 'test', id: 'town-test:c1f6a8db5428ea02a43ca906c340949c77c99df0bfcc5f2cb107bfb60320a1c6',
     service: 'service:7', issuer: value.observation.receipt.observer,
     city: 'Chicago', task: 'evening-plan', status: 'valid', provenance: 'adapter-observed',
     endpoint: value.profile.card.url, cardDigest: value.profile.source.cardDigest,
   }, diagnostics: [] });
+});
+
+test('binds Town policy evidence IDs to both the selected service and retained bundle', async () => {
+  const value = await admissionFixture();
+  const first = await qualifyTownTestAdmission(value.input);
+  const reused = await qualifyTownTestAdmission({ ...value.input, service: 'service:8' });
+  assert.notEqual(reused.admission.id, first.admission.id);
 });
 
 async function copiedBundle(): Promise<{ root: string; bundle: string }> {
@@ -382,28 +389,25 @@ test('deadline crossing during spawn setup kills and awaits the real child', asy
   const wrapper = join(root, 'python'); const pidFile = join(root, 'pid');
   await writeFile(wrapper, `#!/bin/sh\nprintf '%s' "$$" > ${JSON.stringify(pidFile)}\nexec /bin/sleep 60\n`,
     { mode: 0o700 });
-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'performance');
-  assert.ok(descriptor);
+  let descriptor: PropertyDescriptor | undefined;
   let calls = 0; let pid: number | undefined;
-  // deadline() plus the two Git children consume calls 1-7. Call 8 is the
-  // wrapper's pre-spawn check; call 9 crosses the deadline after spawn returns.
-  Object.defineProperty(globalThis, 'performance', { configurable: true,
-    value: { now: () => {
-      if (++calls < 9) return 0;
-      const end = Date.now() + 2_000;
-      while (Date.now() < end) {
-        try { if (requireRead(pidFile).length > 0) break; } catch { /* child has not started yet */ }
-      }
-      return 10_001;
-    } } });
   try {
+    descriptor = Object.getOwnPropertyDescriptor(globalThis, 'performance');
+    assert.ok(descriptor);
+    // deadline() plus the two Git children consume calls 1-7. Call 8 is the
+    // wrapper's pre-spawn check; call 9 crosses the deadline after spawn returns.
+    Object.defineProperty(globalThis, 'performance', { configurable: true,
+      value: { now: () => {
+        if (++calls < 9) return 0;
+        const end = Date.now() + 2_000;
+        while (Date.now() < end) {
+          try { if (requireRead(pidFile).length > 0) break; } catch { /* child has not started yet */ }
+        }
+        return 10_001;
+      } } });
     await assert.rejects(readTownEvidence({ bundleDirectory: fixture.bundle,
       runtime: { checkout: townRuntime().checkout, python: wrapper } }),
     (error: unknown) => error instanceof Error && error.message === 'Town evidence rejected');
-  } finally {
-    Object.defineProperty(globalThis, 'performance', descriptor);
-  }
-  try {
     const rawPid = await waitFor(() => {
       try { return Number((requireRead(pidFile)).trim()); } catch { return undefined; }
     });
@@ -411,8 +415,19 @@ test('deadline crossing during spawn setup kills and awaits the real child', asy
     const stopped = await waitFor(() => processIsRunning(pid!) ? undefined : true);
     assert.equal(stopped, true, `spawned child ${pid} was still running after rejection`);
   } finally {
-    if (pid && processIsRunning(pid)) process.kill(pid, 'SIGKILL');
-    await rm(root, { recursive: true, force: true });
+    try {
+      if (descriptor) Object.defineProperty(globalThis, 'performance', descriptor);
+    } finally {
+      if (!pid) {
+        try {
+          const fallback = Number(requireRead(pidFile).trim());
+          if (Number.isSafeInteger(fallback) && fallback > 0) pid = fallback;
+        } catch { /* child did not write its PID */ }
+      }
+      try { if (pid && processIsRunning(pid)) process.kill(pid, 'SIGKILL'); }
+      catch { /* best-effort fallback cleanup */ }
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -545,7 +560,7 @@ test('stale, future and reversed windows are invalid while unknown epoch stays u
   assert.equal((await qualifyTownTestAdmission(retired)).admission.status, 'invalid');
   const unknown = structuredClone(value.input) as AdmissionInput; unknown.epoch.epoch = 'unknown';
   assert.deepEqual(await qualifyTownTestAdmission(unknown), { admission: {
-    kind: 'test', id: `town-test:${value.observation.receipt.bundleFingerprint}`,
+    kind: 'test', id: 'town-test:c1f6a8db5428ea02a43ca906c340949c77c99df0bfcc5f2cb107bfb60320a1c6',
     service: 'service:7', issuer: value.observation.receipt.observer,
     city: 'Chicago', task: 'evening-plan', status: 'unknown', provenance: 'adapter-observed',
     endpoint: value.profile.card.url, cardDigest: value.profile.source.cardDigest,

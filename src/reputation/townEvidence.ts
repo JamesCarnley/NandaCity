@@ -428,7 +428,8 @@ export async function qualifyTownTestAdmission(input: {
   const status: 'valid' | 'invalid' | 'unknown' = diagnostics.length === 0 ? 'valid' : unknown ? 'unknown' : 'invalid';
   return {
     admission: {
-      kind: 'test', id: `town-test:${evidence.receipt.bundleFingerprint}`,
+      kind: 'test', id: `town-test:${createHash('sha256')
+        .update(JSON.stringify([input.service, evidence.receipt.bundleFingerprint])).digest('hex')}`,
       service: input.service, issuer: evidence.receipt.observer,
       city: statement.input.city, task: statement.input.capability,
       status, provenance: 'adapter-observed', endpoint: current.card.url,

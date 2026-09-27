@@ -63,8 +63,10 @@ discovery demonstration, and pure signed-interaction format:
   discovers one of three local candidates per city through both real Indexes,
   invokes the published loopback A2A service, and exports evidence the parent
   independently rechecks before cleanup; and
-- a pure explained reputation calculator over explicit qualified inputs, not yet
-  an independently verified ranking integration; and
+- a pure explained reputation calculator plus a bounded raw-input ranking
+  composer that independently derives current profiles, accepted-reviewer
+  coverage, retained historical evidence, authority epochs, and native Town
+  admissions at one frozen observation; and
 - a two-Index feedback retention drill, bounded raw-evidence reader and separate
   historical verifier, including provider loss, reorg, revocation and empty-DB
   missing-byte evidence. Index coverage remains self-reported, not complete history.
@@ -82,7 +84,7 @@ semantic quality. See [the City interaction format](docs/interaction-format.md).
 Do not broaden the local write path to a public or non-loopback RPC. The demo
 fetches AgentCards only from its own exact loopback origin/paths; arbitrary
 external card fetching is not supported. Index rows are candidates, not authority.
-Public-chain writes, deployed A2A service operation, integrated reputation ranking, and an
+Public-chain writes, deployed A2A service operation, and an
 interactive UI remain outside this boundary. The static HTML report is a
 read-only artifact, not an interactive selection UI. The loopback task service implements only
 `message/send` and `tasks/get`; body signatures do not authorize polling, and
@@ -90,9 +92,10 @@ the subset is not a complete A2A implementation.
 The journey JSON retains original evidence, but its stopped ephemeral Anvil is
 not a durable authority source; do not claim that later parties can independently
 re-read chain history from the export alone.
-The comparison's distinct verifier process shares the same test host and owned
-chain; it does not prove independent operator custody, live city facts, or
-semantic quality. The interactive UI and independent ranking adapters remain unbuilt.
+The comparison and ranking consumers share the same test host and owned
+chain; they do not prove independent operator custody, live city facts, or
+semantic quality. The interactive UI, public-chain ranking service, and
+operator-separated evidence adapters remain unbuilt.
 Local feedback publication alone is not independent canonical read-back, document
 availability, historical signature ordering, service quality, or Index retention.
 The separate retention drill supplies bounded availability evidence, not global

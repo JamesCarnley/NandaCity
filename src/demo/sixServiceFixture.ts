@@ -24,12 +24,14 @@ import type { CityRequest, SignedEnvelope } from '../interaction/schema.js';
 import { signFeedback } from '../feedback/signatures.js';
 import type { CityFeedback } from '../feedback/schema.js';
 import type { FeedbackIndexSource } from '../feedback/indexClient.js';
+import type { ReputationDeploymentProvenance } from '../feedback/reputationActivation.js';
 import { prepareLocalFeedbackPublication, prepareLocalFeedbackRevocation, submitPreparedFeedback,
   type FeedbackSubmissionResult, type PreparedFeedbackPublication, type PrepareLocalFeedbackPublicationInput } from './feedbackPublication.js';
 import { withOwnedAnvil } from './anvil.js';
 import { withOwnedIndexes, type OwnedIndexEnvironment } from './indexProcesses.js';
 import { checkOwnedCancellation, ownedFetch } from './ownedLifecycle.js';
-import { boston, chicago, deployRegistryWithDomain, deployReputationRegistry, published, receipt, registryAbi } from './registryFixture.js';
+import { boston, chicago, deployRegistryWithDomain, deployReputationRegistryWithProvenance,
+  published, receipt, registryAbi } from './registryFixture.js';
 import { fetchOwnedCard, listenOwnedServer } from './twoIndexes.js';
 
 const CHAIN_ID = 31_337;
@@ -69,6 +71,8 @@ export type SixServiceFixture = {
   feedback?: {
     /** Known pre-deployment lower bound, not exact proxy activation or completeness proof. */
     source: FeedbackIndexSource;
+    /** Raw configured deployment provenance; consumers must authenticate it independently. */
+    provenance: ReputationDeploymentProvenance;
     sign: (value: CityFeedback) => Promise<SignedEnvelope>;
     publish: (input: Omit<PrepareLocalFeedbackPublicationInput,
       'publicClient' | 'walletClient' | 'identityRegistry' | 'reputationRegistry' | 'allowedDocumentURL'>) => Promise<FeedbackSubmissionResult>;
@@ -138,7 +142,8 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
   if (options.feedback) {
     const documentUrls = [...options.feedback.documentUrls];
     const startBlock = (await chain.getBlock()).number.toString();
-    const reputationRegistry = await deployReputationRegistry(chain, adminWallet, registry);
+    const { address: reputationRegistry, provenance } =
+      await deployReputationRegistryWithProvenance(chain, adminWallet, registry);
     await testClient.setBalance({ address: caller.address, value: parseEther('1') });
     const walletClient = createWalletClient({ account: caller, transport });
     const clients = { publicClient: chain, walletClient };
@@ -147,6 +152,7 @@ async function scenario<T>(rpcUrl: string, indexCheckout: string,
     feedback = {
       source: { chainId: CHAIN_ID, genesisHash: genesis.hash, identityRegistry: registry,
         reputationRegistry, startBlock, confirmations: 0 },
+      provenance,
       sign: (value) => { checkOwnedCancellation(); return signFeedback(value, caller); },
       publish: async (input) => {
         checkOwnedCancellation();
