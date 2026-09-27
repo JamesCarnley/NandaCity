@@ -2,10 +2,13 @@ import { pathToFileURL } from 'node:url';
 
 import { z } from 'zod';
 
-import { runExternalClient, type ExternalClientConfig } from './externalClient.js';
+import { runExternalClient, projectExternalClientResult, type ExternalClientConfig, type ExternalClientResult,
+  type LicensedExternalClientResult } from './externalClient.js';
+import { retentionSchema } from '../live/retention.js';
 
 const origin = z.string().url().max(256);
 const configSchema = z.strictObject({
+  retention: retentionSchema.optional(),
   city: z.enum(['Chicago', 'Boston']),
   indexOrigins: z.tuple([origin, origin]),
   rpcOrigin: origin,
@@ -19,16 +22,23 @@ const configSchema = z.strictObject({
   chosenAgentId: z.string().regex(/^(0|[1-9][0-9]*)$/).optional(),
 });
 
+export function serializeExternalClientResult(result: ExternalClientResult | LicensedExternalClientResult, now?: () => string): string {
+  return `${JSON.stringify(projectExternalClientResult(result, now))}\n`;
+}
+
 export async function runExternalClientCli(args = process.argv.slice(2)): Promise<number> {
   try {
     if (args.length !== 2 || args[0] !== '--config' || args[1]!.length > 4096) {
       throw new Error('expected one bounded public --config argument');
     }
     const config = configSchema.parse(JSON.parse(args[1]!));
-    process.stdout.write(`${JSON.stringify(await runExternalClient(config as ExternalClientConfig))}\n`);
+    const result = await runExternalClient(config as ExternalClientConfig);
+    try { process.stdout.write(serializeExternalClientResult(result)); }
+    finally { if ('mode' in result && result.mode === 'licensed-receipts-only') result.close(); }
     return 0;
   } catch (error) {
-    process.stderr.write(`External client failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    // Configuration/transport errors can contain private or source-derived text.
+    process.stderr.write('External client failed; no result exported.\n');
     return 1;
   }
 }

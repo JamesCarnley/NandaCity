@@ -3,14 +3,33 @@ import { basename, dirname, extname, isAbsolute, resolve } from 'node:path';
 
 import type { SixServiceJourneyResult } from '../demo/sixServiceJourney.js';
 import { withOwnedLifecycle } from '../demo/ownedLifecycle.js';
-import { renderStaticReport } from './renderHtml.js';
-import { buildReportViewModel } from './viewModel.js';
+import { renderStaticReport, renderReceiptsOnlyReport } from './renderHtml.js';
+import { buildReportViewModel, buildReceiptsOnlyViewModel } from './viewModel.js';
+import type { LicensedExternalClientResult } from '../client/externalClient.js';
 
 export type StaticReportPaths = { htmlPath: string; evidencePath: string };
 
 /** Reserves both explicit sibling paths before any fixture work; neither existing file is overwritten. */
 export async function writeStaticReport(produce: () => Promise<SixServiceJourneyResult>,
   paths: StaticReportPaths): Promise<void> {
+  return writeReportFiles(async () => {
+    const result = await produce();
+    return { htmlText: renderStaticReport(buildReportViewModel(result), basename(paths.evidencePath)),
+      originalJson: `${JSON.stringify(result, null, 2)}\n` };
+  }, paths);
+}
+
+/** Only an allowlisted public summary is serialized, never the caller's private input. */
+export async function writeReceiptsOnlyReport(result: LicensedExternalClientResult,
+  paths: StaticReportPaths, now?: () => string): Promise<void> {
+  return writeReportFiles(async () => {
+    const model = buildReceiptsOnlyViewModel(result, now);
+    return { htmlText: renderReceiptsOnlyReport(model, basename(paths.evidencePath)),
+      originalJson: `${JSON.stringify(model, null, 2)}\n` };
+  }, paths);
+}
+
+async function writeReportFiles(produce: () => Promise<{ htmlText: string; originalJson: string }>, paths: StaticReportPaths): Promise<void> {
   const { htmlPath, evidencePath } = paths;
   if (!isAbsolute(htmlPath) || !isAbsolute(evidencePath) ||
       resolve(htmlPath) === resolve(evidencePath) ||
@@ -29,10 +48,7 @@ export async function writeStaticReport(produce: () => Promise<SixServiceJourney
       lifecycle.check();
       evidence = await open(evidencePath, 'wx', 0o600);
       lifecycle.check();
-      const result = await produce();
-      const model = buildReportViewModel(result);
-      const htmlText = renderStaticReport(model, basename(evidencePath));
-      const originalJson = `${JSON.stringify(result, null, 2)}\n`;
+      const { htmlText, originalJson } = await produce();
       lifecycle.check();
       await evidence.writeFile(originalJson, 'utf8');
       await evidence.sync();

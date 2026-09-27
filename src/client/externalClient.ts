@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { createPublicClient, http, type Address } from 'viem';
-import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
+import { eveningPlanInputSchema, type EveningPlanInput } from '../a2a/input.js';
 
 import { CITY_REQUEST_DATA_TYPE } from '../a2a/wire.js';
 import { a2aTaskSchema, type A2ATask } from '../a2a/wire.js';
@@ -16,9 +17,14 @@ import { readIdentitySnapshot } from '../identity/registry.js';
 import { decodeEnvelope, signRequest } from '../interaction/signatures.js';
 import { envelopeSchema, type CityRequest, type SignedEnvelope } from '../interaction/schema.js';
 import { verifyJourneyEvidence, type JourneyEvidence, type JourneyReport } from '../demo/journeyReport.js';
+import { retentionSchema, licensedRetentionSchema, TransientByteHolder, contentFinding, projectReceiptEvidence,
+  projectReceiptSummary, type Retention, type LicensedRetention, type ContentFinding, type EarlierByteCheck, type ReceiptSummary } from '../live/retention.js';
 
 export type City = 'Chicago' | 'Boston';
 export type ExternalClientConfig = {
+  /** Programmatic only: never serialize a caller key in CLI arguments. */
+  live?: { input: EveningPlanInput; caller: PrivateKeyAccount };
+  retention?: Retention;
   city: City;
   indexOrigins: [string, string];
   rpcOrigin: string;
@@ -37,6 +43,58 @@ export type ExternalClientResult = {
   retry: { sameTask: true; taskId: string };
   childVerified: true;
 };
+export type RetainedJourney = { retention: LicensedRetention; evidence: JourneyEvidence; report: JourneyReport;
+  earlierByteCheck?: EarlierByteCheck; content: () => ContentFinding; close: () => void };
+export type LicensedExternalClientResult = Omit<ExternalClientResult, 'childVerified' | 'evidence' | 'report'> & RetainedJourney & {
+  mode: 'licensed-receipts-only'; childVerified: false;
+};
+
+/** Takes ownership only of a bounded byte copy; all returned evidence is receipt-only.
+ * Verification receives the effective local/runtime policy, never the longer configured ceiling. */
+export async function retainLicensedJourney(evidence: JourneyEvidence, configured: LicensedRetention,
+  verify: (safe: JourneyEvidence, bytes: Uint8Array | undefined, retention: LicensedRetention) => Promise<JourneyReport>, now: () => string = utcNow): Promise<RetainedJourney> {
+  const local = licensedRetentionSchema.parse(configured);
+  const metadata = evidence.task.metadata?.['org.nandacity'] as Record<string, unknown> | undefined;
+  const runtime = licensedRetentionSchema.safeParse(metadata?.retention);
+  if (!runtime.success || runtime.data.policyId !== local.policyId) throw new Error('incompatible runtime retention policy');
+  // Response metadata may restrict local permission, never grant or extend it.
+  const retention = Object.freeze({ ...local, expiresAt: Date.parse(runtime.data.expiresAt) < Date.parse(local.expiresAt) ? runtime.data.expiresAt : local.expiresAt });
+  const holder = new TransientByteHolder(now);
+  const safe = projectReceiptEvidence(evidence);
+  const taskId = safe.task.id;
+  try {
+    const encoded = evidence.answerBase64 ?? evidence.task.artifacts?.[0]?.parts[0]?.data.answerBase64;
+    if (encoded !== undefined && contentFinding(retention, now()).contentAvailability !== 'expired') {
+      if (typeof encoded !== 'string' || encoded.length > Math.ceil(256 * 1024 / 3) * 4 ||
+          !encoded.length || Buffer.from(encoded, 'base64').toString('base64') !== encoded) throw new Error('invalid transient answer encoding');
+      const nested = evidence.task.artifacts?.[0]?.parts[0]?.data.answerBase64;
+      if (nested !== undefined && nested !== encoded) throw new Error('transient answer copies disagree');
+      holder.put(taskId, Buffer.from(encoded, 'base64'), retention);
+    }
+    let earlierByteCheck: EarlierByteCheck | undefined;
+    const bytes = holder.read(taskId);
+    if (bytes) {
+      const observedAt = now();
+      try {
+        const earlier = await verify(safe, bytes, retention);
+        earlierByteCheck = { observedAt, answerBinding: earlier.completion?.answerBinding ?? 'unavailable', evidenceUsable: earlier.evidenceUsable };
+      } finally { bytes.fill(0); }
+    }
+    const report = await verify(safe, undefined, retention);
+    return { retention, evidence: safe, report,
+      ...(earlierByteCheck ? { earlierByteCheck } : {}),
+      content: () => contentFinding(retention, now(), holder.has(taskId)), close: () => holder.close() };
+  } catch (error) { holder.close(); throw error; }
+}
+
+export function projectExternalClientResult(result: LicensedExternalClientResult, now?: () => string): ReceiptSummary;
+export function projectExternalClientResult(result: ExternalClientResult, now?: () => string): ExternalClientResult;
+export function projectExternalClientResult(result: ExternalClientResult | LicensedExternalClientResult, now?: () => string): ExternalClientResult | ReceiptSummary;
+export function projectExternalClientResult(result: ExternalClientResult | LicensedExternalClientResult, now: () => string = utcNow): ExternalClientResult | ReceiptSummary {
+  if (!('retention' in result)) return result;
+  return projectReceiptSummary(result.evidence, result.report, result.retention, now(),
+    result.content().contentAvailability === 'available', result.earlierByteCheck);
+}
 
 const MAX_RPC_BYTES = 512 * 1024;
 const RPC_TIMEOUT_MS = 5_000;
@@ -109,8 +167,8 @@ export async function rpcTask(url: string, method: 'message/send' | 'tasks/get',
 
 /** Poll an already allowlisted A2A service until completion or a bounded task deadline. */
 export async function pollTerminalTask(url: string, taskId: string,
-  timeoutMs = TASK_TIMEOUT_MS): Promise<A2ATask> {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > TASK_TIMEOUT_MS) {
+  timeoutMs = TASK_TIMEOUT_MS, mode: 'fixture' | 'live' = 'fixture'): Promise<A2ATask> {
+  if (!['fixture', 'live'].includes(mode) || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > (mode === 'live' ? 65_000 : TASK_TIMEOUT_MS)) {
     throw new Error('invalid task deadline');
   }
   const deadline = Date.now() + timeoutMs;
@@ -175,7 +233,13 @@ function sameCandidate(a: DiscoveredCandidate, b: DiscoveredCandidate): boolean 
 }
 
 /** City-authored separate-process example; owns its caller signing key in this process only. */
-export async function runExternalClient(config: ExternalClientConfig): Promise<ExternalClientResult> {
+export function runExternalClient(config: ExternalClientConfig & { retention: LicensedRetention }): Promise<LicensedExternalClientResult>;
+export function runExternalClient(config: ExternalClientConfig & { retention?: Extract<Retention, { kind: 'authored-fixture' }> }): Promise<ExternalClientResult>;
+export function runExternalClient(config: ExternalClientConfig): Promise<ExternalClientResult | LicensedExternalClientResult>;
+export async function runExternalClient(config: ExternalClientConfig): Promise<ExternalClientResult | LicensedExternalClientResult> {
+  const retention = config.retention === undefined ? undefined : retentionSchema.parse(config.retention);
+  if (config.live && (retention?.kind !== 'licensed' || eveningPlanInputSchema.parse(config.live.input).city !== config.city ||
+      !/^0x[0-9a-fA-F]{40}$/.test(config.live.caller.address))) throw new Error('invalid live caller configuration');
   if (config.city !== 'Chicago' && config.city !== 'Boston') throw new Error('unsupported city');
   const indexOrigins = config.indexOrigins.map(exactLoopbackOrigin);
   if (indexOrigins.length !== 2 || indexOrigins[0] === indexOrigins[1]) throw new Error('two distinct Index origins required');
@@ -219,8 +283,10 @@ export async function runExternalClient(config: ExternalClientConfig): Promise<E
     verified[0];
   if (!selected) throw new Error('chosen agent is not a verified city candidate');
   const url = serviceUrlAllowed(selected.verdict.profile.card.url, serviceOrigins);
-  const account = privateKeyToAccount(generatePrivateKey());
-  const request = await signRequest(requestFor(selected.candidate, selected.verdict, config.city, account.address), account);
+  const account = config.live?.caller ?? privateKeyToAccount(generatePrivateKey());
+  const unsigned = requestFor(selected.candidate, selected.verdict, config.city, account.address);
+  if (config.live) unsigned.input = eveningPlanInputSchema.parse(config.live.input);
+  const request = await signRequest(unsigned, account);
   const params = { message: { kind: 'message', role: 'user', messageId: randomUUID(),
     parts: [{ kind: 'data', data: { type: CITY_REQUEST_DATA_TYPE, version: '0.1', envelope: request } }] },
     configuration: { blocking: false, acceptedOutputModes: ['application/json'] } };
@@ -230,23 +296,30 @@ export async function runExternalClient(config: ExternalClientConfig): Promise<E
   if (repeated.id !== submitted.id || repeated.contextId !== submitted.contextId) {
     throw new Error('exact retry created a different task');
   }
-  const task = await pollTerminalTask(url, submitted.id);
-  if (task.status.state !== 'completed') throw new Error('A2A task did not complete successfully');
+  const task = await pollTerminalTask(url, submitted.id, config.live ? 65_000 : TASK_TIMEOUT_MS, config.live ? 'live' : 'fixture');
+  if (task.status.state !== 'completed' && retention?.kind !== 'licensed') throw new Error('A2A task did not complete successfully');
   const metadata = task.metadata?.['org.nandacity'];
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) throw new Error('A2A evidence metadata missing');
   const signed = metadata as Record<string, unknown>;
   const acceptance = envelopeSchema.parse(signed['acceptance']);
-  const completion = envelopeSchema.parse(signed['completion']);
+  const completion = retention?.kind === 'licensed' && signed['completion'] === undefined ? undefined : envelopeSchema.parse(signed['completion']);
   const answerBase64 = task.artifacts?.[0]?.parts[0]?.data?.['answerBase64'];
-  if (typeof answerBase64 !== 'string') throw new Error('A2A answer bytes missing');
+  if (retention?.kind !== 'licensed' && typeof answerBase64 !== 'string') throw new Error('A2A answer bytes missing');
   const decoded = decodeEnvelope(request).statement.value;
   if (decoded.kind !== 'request') throw new Error('signed request kind changed');
   const evidence: JourneyEvidence = { candidate: selected.candidate,
-    cardBase64: Buffer.from(selected.cardBytes).toString('base64'), request, acceptance, completion,
-    answerBase64, task,
+    cardBase64: Buffer.from(selected.cardBytes).toString('base64'), request, acceptance, ...(completion ? { completion } : {}),
+    ...(typeof answerBase64 === 'string' ? { answerBase64 } : {}), task,
     basisObservation: await readIdentitySnapshot(chain, selected.candidate.agent,
       BigInt(decoded.profileBasis.blockNumber)),
     currentObservation: await readIdentitySnapshot(chain, selected.candidate.agent), observedAt: utcNow() };
+  if (retention?.kind === 'licensed') {
+    const retained = await retainLicensedJourney(evidence, retention, (safe, bytes, effectiveRetention) => verifyJourneyEvidence(safe,
+      chain, config.domain, filter, cardOrigin, { retention: effectiveRetention, ...(bytes ? { answerBytes: bytes } : {}) }));
+    return { ...retained, mode: 'licensed-receipts-only', city: config.city,
+      selectedAgentId: selected.candidate.agent.agentId, selectionReason: 'configured licensed receipt-only result',
+      callerAddress: account.address.toLowerCase() as Address, retry: { sameTask: true, taskId: repeated.id }, childVerified: false };
+  }
   const report = await verifyJourneyEvidence(evidence, chain, config.domain, filter, cardOrigin);
   if (!report.evidenceUsable || report.execution !== 'completed' || report.firstBrokenBoundary !== null) {
     throw new Error(`external client evidence failed at ${report.firstBrokenBoundary ?? 'unknown'}`);

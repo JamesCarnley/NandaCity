@@ -8,9 +8,10 @@ import { originEnvelopeSchema, type OriginEnvelope, type OriginProfile, type Ori
 import { signOriginStatement, verifyOriginSignature } from '../origin/signatures.js';
 import type { OriginProfileObservation } from '../origin/profile.js';
 import type { EveningPlanInput } from './input.js';
-import { storedTaskRecordSchema, type TaskRecordParser } from './wire.js';
+import { licensedTaskRecordSchema, storedTaskRecordSchema, type StoredTaskRecord, type TaskRecordParser } from './wire.js';
 
-export type RuntimeRequest = { kind: 'request'; interactionId: string; createdAt: string; deadline: string; input: EveningPlanInput };
+export type RuntimeRequest = { kind: 'request'; interactionId: string; createdAt: string; deadline: string; input: EveningPlanInput;
+  caller: { method: string; address: string; chainId?: number } };
 export type RuntimeAuthority<Profile> = {
   observedAt: string; currentProfile: Profile | null; requestUsable: boolean; allUsable: boolean;
   terminalEligible: boolean; runtimeSigner: 'authorized' | 'unauthorized' | 'not-evaluated'; failureReason: string;
@@ -68,7 +69,7 @@ RuntimeStrategy<CityRequest, SignedEnvelope, VerifiedProfile> {
       return [request.service.method, agent.chainId, agent.registry.toLowerCase(), agent.agentId,
         request.caller.method, request.caller.chainId, request.caller.address.toLowerCase(), request.interactionId].join(':');
     },
-    parseRecord: (value) => storedTaskRecordSchema.parse(value),
+    parseRecord: parseEthereumTaskRecord,
     async evaluate(request, acceptance, signer) {
       const decoded = decodeEnvelope(request).statement.value;
       if (decoded.kind !== 'request') throw new Error('expected request');
@@ -100,8 +101,79 @@ function originInteractionKey(request: OriginRequest): string {
   return `city-origin@0.1:${JSON.stringify([request.service.identityUrl, request.caller.address, request.interactionId])}`;
 }
 const originRecordSchema = storedTaskRecordSchema.extend({ requestEnvelope: originEnvelopeSchema, acceptance: originEnvelopeSchema });
+const licensedOriginRecordSchema = licensedTaskRecordSchema.extend({ requestEnvelope: originEnvelopeSchema, acceptance: originEnvelopeSchema });
+function isLicensedRecord(value: unknown): boolean { return !!value && typeof value === 'object' && 'version' in value && value.version === '0.2'; }
+
+/** Structural linkage only; signature/authority verification remains the selected strategy's job. */
+function checkLicensedSlots<Envelope>(record: StoredTaskRecord<Envelope>, interactionId: string,
+  check: (value: unknown, kind: 'request' | 'acceptance' | 'completion') => { time: string; outcome?: string }): void {
+  const task = record.task;
+  const city = task.metadata!['org.nandacity'] as Record<string, unknown>;
+  const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+  if (city.interactionId !== interactionId || !same(city.acceptance, record.acceptance)) throw new Error('licensed metadata linkage mismatch');
+  const accepted = check(city.acceptance, 'acceptance');
+  const history = task.history![0]!;
+  if (history.role !== 'user' || history.parts[0]!.data.type !== 'org.nandacity.city-request' ||
+      !same(history.parts[0]!.data.envelope, record.requestEnvelope)) throw new Error('licensed request history mismatch');
+  check(history.parts[0]!.data.envelope, 'request');
+  if (task.status.state === 'completed') {
+    const completed = check(city.completion, 'completion');
+    const data = task.artifacts?.[0]?.parts[0]?.data;
+    if (completed.outcome !== 'completed' || completed.time !== task.status.timestamp || city.failureReason !== undefined ||
+        task.status.message || !data || data.type !== 'org.nandacity.city-result' || !same(data.completion, city.completion)) {
+      throw new Error('licensed completed task mismatch');
+    }
+    check(data.completion, 'completion');
+  } else {
+    const message = task.status.message;
+    const data = message?.parts[0]?.data;
+    if (task.artifacts || message?.role !== 'agent' || !data || data.type !== 'org.nandacity.city-status' ||
+        !same(data.acceptance, record.acceptance)) throw new Error('licensed status mismatch');
+    check(data.acceptance, 'acceptance');
+    if (task.status.state === 'submitted') {
+      if (data.state !== 'accepted' || task.status.timestamp !== accepted.time || city.completion !== undefined ||
+          data.completion !== undefined || city.failureReason !== undefined || data.reason !== undefined) throw new Error('licensed submitted task mismatch');
+    } else {
+      if (data.state !== 'failed' || !city.failureReason || city.failureReason !== data.reason ||
+          !same(data.completion, city.completion)) throw new Error('licensed failed task mismatch');
+      if (city.completion !== undefined) {
+        const completed = check(city.completion, 'completion');
+        if (!['failed', 'expired'].includes(completed.outcome ?? '') || completed.time !== task.status.timestamp) throw new Error('licensed failure completion mismatch');
+        check(data.completion, 'completion');
+      }
+    }
+  }
+}
+
+export const parseEthereumTaskRecord: TaskRecordParser<SignedEnvelope> = (value) => {
+  if (!isLicensedRecord(value)) return storedTaskRecordSchema.parse(value);
+  const record = licensedTaskRecordSchema.parse(value);
+  const request = decodeEnvelope(record.requestEnvelope).statement;
+  const acceptance = decodeEnvelope(record.acceptance).statement;
+  if (request.value.kind !== 'request' || acceptance.value.kind !== 'acceptance') throw new Error('licensed Ethereum statement kind mismatch');
+  const agent = request.value.service.agent;
+  const expectedKey = [request.value.service.method, agent.chainId, agent.registry.toLowerCase(), agent.agentId,
+    request.value.caller.method, request.value.caller.chainId, request.value.caller.address.toLowerCase(), request.value.interactionId].join(':');
+  if (record.interactionKey !== expectedKey || record.requestDigest !== request.digest ||
+      acceptance.value.requestDigest !== request.digest || acceptance.value.deadline !== request.value.deadline ||
+      Date.parse(acceptance.value.acceptedAt) < Date.parse(request.value.createdAt)) throw new Error('licensed Ethereum linkage mismatch');
+  checkLicensedSlots(record, request.value.interactionId, (nested, kind) => {
+    const decoded = decodeEnvelope(nested).statement;
+    const statement = decoded.value;
+    if (statement.kind !== kind ||
+        (kind === 'request' && decoded.digest !== request.digest) ||
+        (kind === 'acceptance' && decoded.digest !== acceptance.digest) ||
+        (statement.kind === 'completion' && (statement.acceptanceDigest !== acceptance.digest ||
+          Date.parse(statement.recordedAt) < Date.parse(acceptance.value.kind === 'acceptance' ? acceptance.value.acceptedAt : '')))) {
+      throw new Error('licensed Ethereum nested evidence mismatch');
+    }
+    return { time: statement.kind === 'request' ? statement.createdAt : statement.kind === 'acceptance' ? statement.acceptedAt : statement.recordedAt,
+      ...(statement.kind === 'completion' ? { outcome: statement.outcome } : {}) };
+  });
+  return record;
+};
 export const parseOriginTaskRecord: TaskRecordParser<OriginEnvelope> = (value) => {
-  const record = originRecordSchema.parse(value);
+  const record = isLicensedRecord(value) ? licensedOriginRecordSchema.parse(value) : originRecordSchema.parse(value);
   const request = decodeOriginEnvelope(record.requestEnvelope).statement;
   const acceptance = decodeOriginEnvelope(record.acceptance).statement;
   if (request.value.kind !== 'request' || acceptance.value.kind !== 'acceptance' ||
@@ -134,6 +206,17 @@ export const parseOriginTaskRecord: TaskRecordParser<OriginEnvelope> = (value) =
       if ('acceptance' in data) checkEnvelope(data.acceptance, 'acceptance');
       if ('completion' in data) checkEnvelope(data.completion, 'completion');
     }
+  }
+  if (record.version === '0.2') {
+    if (acceptance.value.deadline !== request.value.deadline || Date.parse(acceptance.value.acceptedAt) < Date.parse(request.value.createdAt)) throw new Error('licensed origin acceptance time mismatch');
+    checkLicensedSlots(record, request.value.interactionId, (nested, kind) => {
+      checkEnvelope(nested, kind);
+      const statement = decodeOriginEnvelope(nested).statement.value;
+      if (statement.kind !== 'request' && statement.kind !== 'acceptance' && statement.kind !== 'completion') throw new Error('licensed origin statement kind mismatch');
+      if (statement.kind === 'completion' && Date.parse(statement.recordedAt) < Date.parse(acceptance.value.kind === 'acceptance' ? acceptance.value.acceptedAt : '')) throw new Error('licensed origin completion time mismatch');
+      return { time: statement.kind === 'request' ? statement.createdAt : statement.kind === 'acceptance' ? statement.acceptedAt : statement.recordedAt,
+        ...(statement.kind === 'completion' ? { outcome: statement.outcome } : {}) };
+    });
   }
   return record;
 };

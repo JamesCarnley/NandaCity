@@ -10,6 +10,7 @@ import { verifyProfile, type AuthoritySnapshot } from '../identity/verify.js';
 import { verifyInteraction, type InteractionFinding, type ContinuityFinding } from '../interaction/verify.js';
 import { decodeEnvelope } from '../interaction/signatures.js';
 import type { SignedEnvelope } from '../interaction/schema.js';
+import { contentFinding, type ContentFinding, type LicensedRetention } from '../live/retention.js';
 
 export type JourneyEvidence = {
   candidate: DiscoveredCandidate;
@@ -26,6 +27,8 @@ export type JourneyEvidence = {
 };
 
 export type JourneyReport = {
+  content?: ContentFinding;
+  providerOutcome?: 'completed' | 'failed' | 'expired' | 'cancelled' | 'unresolved';
   discovery: DiscoveryVerification;
   request?: InteractionFinding['request'];
   acceptance?: InteractionFinding['acceptance'];
@@ -92,8 +95,8 @@ function unavailable(origin: string, reason: string): DiscoveryVerification {
 
 /** Re-reads chain and card with a separate client. Exported observations are evidence to compare, not authority. */
 export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: PublicClient,
-  domain: IdentityContinuityDomain, filter: ServiceFilter, allowedCardOrigin: string): Promise<JourneyReport> {
-  const reasons: string[] = [];
+  domain: IdentityContinuityDomain, filter: ServiceFilter, allowedCardOrigin: string,
+  configured?: { retention: LicensedRetention; answerBytes?: Uint8Array }): Promise<JourneyReport> {
   const origin = evidence?.candidate?.observerOrigin ?? 'unknown';
   let task: A2ATask;
   let cardBytes: Uint8Array;
@@ -188,7 +191,9 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
   }
   let answerBytes: Uint8Array | undefined;
   let answerIssue: string | undefined;
-  if (evidence.answerBase64 !== undefined) {
+  if (configured) {
+    if (contentFinding(configured.retention, new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'), configured.answerBytes !== undefined).contentAvailability === 'available') answerBytes = configured.answerBytes;
+  } else if (evidence.answerBase64 !== undefined) {
     try { answerBytes = exactBase64(evidence.answerBase64, 256 * 1024); }
     catch (error) { answerIssue = error instanceof Error ? error.message : String(error); }
   }
@@ -206,7 +211,18 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
     return stopped(discovery, 'interaction', `interaction envelope invalid: ${
       error instanceof Error ? error.message : String(error)}`, continuity);
   }
-  const execution = taskConsistency(task, evidence);
+  const report = reportJourneyInteraction({ ...evidence, task }, discovery, finding, continuity, answerIssue);
+  const { discovery: reportDiscovery, ...reportRest } = report;
+  return { discovery: reportDiscovery, authorityObservations: { exported, latest: current }, ...reportRest,
+    ...(configured ? { content: contentFinding(configured.retention, new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'), answerBytes !== undefined),
+      providerOutcome: finding.completion?.terminalOutcome ?? 'unresolved' } : {}) };
+}
+
+/** Pure final composition, including completed receipt-only tasks with unavailable answer binding. */
+export function reportJourneyInteraction(evidence: JourneyEvidence, discovery: DiscoveryVerification,
+  finding: InteractionFinding, continuity: ContinuityFinding, answerIssue?: string): JourneyReport {
+  const reasons: string[] = [];
+  const execution = taskConsistency(evidence.task, evidence);
   const signedOutcome = finding.completion?.terminalOutcome;
   if (!signedOutcome ||
       (execution === 'completed' && signedOutcome !== 'completed') ||
@@ -232,7 +248,6 @@ export async function verifyJourneyEvidence(evidence: JourneyEvidence, client: P
             execution === 'failed' || execution === 'inconsistent' ? 'execution' : null;
   return {
     discovery,
-    authorityObservations: { exported, latest: current },
     request: finding.request,
     ...(finding.acceptance ? { acceptance: finding.acceptance } : {}),
     ...(finding.completion ? { completion: finding.completion } : {}),

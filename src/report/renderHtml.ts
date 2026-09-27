@@ -1,4 +1,10 @@
 import type { ReportChoice, ReportViewModel } from './viewModel.js';
+import type { ReceiptSummary } from '../live/retention.js';
+
+export function renderReceiptsOnlyReport(model: ReceiptSummary, evidenceFileName: string): string {
+  if (!evidenceFileName || evidenceFileName === '.' || evidenceFileName === '..' || /[/\\]/.test(evidenceFileName)) throw new Error('evidence link must be a sibling file name');
+  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'"><title>City receipt-only summary</title></head><body><main><h1>Receipt-only summary</h1><p>Provider outcome: ${e(model.providerOutcome)}. Task: ${e(model.taskId)}.</p><p>Content: ${e(model.content.contentAvailability)}; semantic replay: ${e(model.content.semanticReplay)}. Quality: not tested.</p><p>Answer binding: ${e(model.findings.completion?.answerBinding ?? 'unavailable')}; evidence usable: ${e(String(model.findings.evidenceUsable))}; first broken boundary: ${e(model.findings.firstBrokenBoundary ?? 'none')}.</p>${model.earlierByteCheck ? `<p>Earlier byte observation (${e(model.earlierByteCheck.observedAt)}): ${e(model.earlierByteCheck.answerBinding)}. This is not current semantic replay.</p>` : ''}<p>${e(model.notice)}</p><a href="./${e(encodeURIComponent(evidenceFileName))}" download>Public receipts and findings JSON</a></main></body></html>\n`;
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')

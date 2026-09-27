@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { envelopeSchema } from '../interaction/schema.js';
+import { licensedRetentionSchema, receiptTaskSchema, type LicensedRetention } from '../live/retention.js';
 
 export const CITY_REQUEST_DATA_TYPE = 'org.nandacity.city-request' as const;
 export const CITY_RESULT_DATA_TYPE = 'org.nandacity.city-result' as const;
@@ -90,10 +91,12 @@ export const storedTaskRecordSchema = z.strictObject({
   task: a2aTaskSchema,
 });
 
+export const licensedTaskRecordSchema = storedTaskRecordSchema.extend({ version: z.literal('0.2'),
+  retention: licensedRetentionSchema, task: receiptTaskSchema });
 export type StoredTaskRecord<Envelope = z.infer<typeof envelopeSchema>> =
-  Omit<z.infer<typeof storedTaskRecordSchema>, 'requestEnvelope' | 'acceptance'> & {
+  Omit<z.infer<typeof storedTaskRecordSchema>, 'requestEnvelope' | 'acceptance' | 'version'> & {
     requestEnvelope: Envelope; acceptance: Envelope;
-  };
+  } & ({ version: '0.1' } | { version: '0.2'; retention: LicensedRetention });
 export type TaskRecordParser<Envelope> = (value: unknown) => StoredTaskRecord<Envelope>;
 
 export type JsonRpcId = string | number | null;

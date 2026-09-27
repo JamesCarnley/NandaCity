@@ -2,6 +2,13 @@ import { z } from 'zod';
 
 import type { SixServiceJourneyResult } from '../demo/sixServiceJourney.js';
 import { decodeEnvelope } from '../interaction/signatures.js';
+import { projectExternalClientResult, type LicensedExternalClientResult } from '../client/externalClient.js';
+import type { ReceiptSummary } from '../live/retention.js';
+
+/** Separate branch: never parses or presents licensed answer content. */
+export function buildReceiptsOnlyViewModel(result: LicensedExternalClientResult, now?: () => string): ReceiptSummary {
+  return projectExternalClientResult(result, now);
+}
 
 const text = z.string().max(4096);
 const money = z.number().int().safe().nonnegative();

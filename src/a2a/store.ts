@@ -4,7 +4,8 @@ import { join } from 'node:path';
 
 import { keccak256, toBytes } from 'viem';
 
-import { storedTaskRecordSchema, type StoredTaskRecord, type TaskRecordParser } from './wire.js';
+import { type StoredTaskRecord, type TaskRecordParser } from './wire.js';
+import { parseEthereumTaskRecord } from './strategy.js';
 import type { SignedEnvelope } from '../interaction/schema.js';
 
 const MAX_RECORD_BYTES = 1024 * 1024;
@@ -24,7 +25,7 @@ export class CityTaskStore<Envelope = SignedEnvelope> {
 
   static async open(directory: string): Promise<CityTaskStore>;
   static async open<Envelope>(directory: string, parseRecord: TaskRecordParser<Envelope>): Promise<CityTaskStore<Envelope>>;
-  static async open<Envelope>(directory: string, parseRecord: TaskRecordParser<Envelope> = storedTaskRecordSchema.parse as TaskRecordParser<Envelope>): Promise<CityTaskStore<Envelope>> {
+  static async open<Envelope>(directory: string, parseRecord: TaskRecordParser<Envelope> = parseEthereumTaskRecord as TaskRecordParser<Envelope>): Promise<CityTaskStore<Envelope>> {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const store = new CityTaskStore(directory, parseRecord);
     const names = await readdir(directory);
@@ -44,16 +45,18 @@ export class CityTaskStore<Envelope = SignedEnvelope> {
   }
 
   getByInteraction(interactionKey: string): StoredTaskRecord<Envelope> | undefined {
-    return this.#byInteraction.get(interactionKey);
+    const record = this.#byInteraction.get(interactionKey);
+    return record?.version === '0.2' ? structuredClone(record) : record;
   }
 
   getByTask(taskId: string): StoredTaskRecord<Envelope> | undefined {
     const interaction = this.#interactionByTask.get(taskId);
-    return interaction ? this.#byInteraction.get(interaction) : undefined;
+    return interaction ? this.getByInteraction(interaction) : undefined;
   }
 
   async save(record: StoredTaskRecord<Envelope>): Promise<void> {
-    const validated = this.parseRecord(record);
+    const parsed = this.parseRecord(record);
+    const validated = parsed.version === '0.2' ? structuredClone(parsed) : parsed;
     const serialized = JSON.stringify(validated);
     if (Buffer.byteLength(serialized, 'utf8') > MAX_RECORD_BYTES) throw new Error('stored task record is too large');
     const destination = join(this.#directory, fileNameFor(validated.interactionKey));

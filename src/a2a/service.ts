@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import { createServer, type IncomingMessage, type ServerResponse, type RequestListener, type Server } from 'node:http';
 
 import { digestBytes } from '../identity/profile.js';
@@ -7,6 +8,7 @@ import { AuthorityObservationError, createEthereumRuntimeStrategy, type Authorit
 import type { PrivateKeyAccount } from 'viem/accounts';
 import { syntheticEveningPlan } from './answer.js';
 import { CityTaskStore } from './store.js';
+import { retentionSchema, licensedRetentionSchema, projectReceiptTask, contentFinding, TransientByteHolder, type Retention, type LicensedRetention } from '../live/retention.js';
 import {
   CITY_REQUEST_DATA_TYPE,
   CITY_RESULT_DATA_TYPE,
@@ -32,23 +34,36 @@ const MAX_EXECUTION_TIMEOUT_MS = 60_000;
 export type { AuthorityObservation } from './strategy.js';
 
 export type ExecutionContext = { taskId: string; contextId: string; signal: AbortSignal };
+/** Live executors carry their source ceiling; authored-fixture callbacks remain unchanged. */
+export type RuntimeExecutor<Request extends RuntimeRequest> = ((request: Request, context: ExecutionContext) => Promise<Uint8Array>) & {
+  readonly retention?: Readonly<LicensedRetention>;
+};
+const liveAdmissionSchema = z.strictObject({ caller: z.discriminatedUnion('method', [
+  z.strictObject({ method: z.literal('eip155-eoa'), chainId: z.number().int().positive().safe(), address: z.string().regex(/^0x[0-9a-f]{40}$/) }),
+  z.strictObject({ method: z.literal('secp256k1-key'), address: z.string().regex(/^0x[0-9a-f]{40}$/) }),
+]) });
+export type LiveAdmission = z.infer<typeof liveAdmissionSchema>;
 
 export type LoopbackServiceOptions = {
+  live?: LiveAdmission;
+  retention?: Retention;
   storeDirectory: string;
   runtimeSigner: PrivateKeyAccount;
   observeAuthority: (request: CityRequest) => Promise<AuthorityObservation>;
   now: () => string;
   executionTimeoutMs?: number;
-  execute?: (request: CityRequest, context: ExecutionContext) => Promise<Uint8Array>;
+  execute?: RuntimeExecutor<CityRequest>;
 };
 
 export type StrategyServiceOptions<Request extends RuntimeRequest, Envelope, Profile> = {
+  live?: LiveAdmission;
+  retention?: Retention;
   storeDirectory: string;
   runtimeSigner: PrivateKeyAccount;
   strategy: RuntimeStrategy<Request, Envelope, Profile>;
   now: () => string;
   executionTimeoutMs?: number;
-  execute?: (request: Request, context: ExecutionContext) => Promise<Uint8Array>;
+  execute?: RuntimeExecutor<Request>;
   server?: { protocol: 'http' | 'https'; create: (handler: RequestListener) => Server };
 };
 
@@ -97,25 +112,29 @@ function asCityMetadata(task: A2ATask): Record<string, unknown> {
 class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
   readonly #running = new Map<string, Promise<void>>();
   #closed = false;
+  readonly #bytes: TransientByteHolder;
 
-  constructor(private readonly store: CityTaskStore<Envelope>, private readonly options: StrategyServiceOptions<Request, Envelope, Profile>) {}
+  constructor(private readonly store: CityTaskStore<Envelope>, private readonly options: StrategyServiceOptions<Request, Envelope, Profile>) {
+    this.#bytes = new TransientByteHolder(options.now);
+  }
 
   async close(): Promise<void> {
     this.#closed = true;
+    this.#bytes.close();
     await Promise.allSettled(this.#running.values());
   }
 
   async getTask(taskId: string, historyLength?: number): Promise<A2ATask> {
     const record = this.store.getByTask(taskId);
     if (!record) throw rpcFault(-32001, 'Task not found', 'task-not-found');
-    this.schedule(record);
+    const task = await this.readTask(record);
     if (historyLength !== undefined) {
       return {
-        ...record.task,
-        history: historyLength === 0 ? [] : (record.task.history ?? []).slice(-historyLength),
+        ...task,
+        history: historyLength === 0 ? [] : (task.history ?? []).slice(-historyLength),
       };
     }
-    return record.task;
+    return task;
   }
 
   async send(value: unknown): Promise<A2ATask> {
@@ -138,6 +157,13 @@ class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
       throw rpcFault(-32005, 'Incompatible content types', 'json-output-not-accepted');
     }
     const request = decoded.request;
+    if (this.options.live) {
+      const caller = this.options.live.caller;
+      if (request.caller.method !== caller.method || request.caller.address !== caller.address ||
+        (caller.method === 'eip155-eoa' && request.caller.chainId !== caller.chainId)) {
+        throw rpcFault(-32012, 'Caller is not admitted', 'caller-not-admitted');
+      }
+    }
     const requestEnvelope = decoded.envelope;
     const key = this.options.strategy.interactionKey(request);
 
@@ -147,8 +173,7 @@ class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
         if (existing.requestDigest !== decoded.digest) {
           throw rpcFault(-32009, 'Interaction key conflicts with different request bytes', 'interaction-key-conflict');
         }
-        this.schedule(existing);
-        return existing.task;
+        return this.readTask(existing);
       }
 
       const acceptedAt = this.options.now();
@@ -215,20 +240,46 @@ class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
         metadata: metadataFor(request, acceptance),
       };
       const record: StoredTaskRecord<Envelope> = {
-        version: '0.1',
+        ...(this.options.retention?.kind === 'licensed' ? { version: '0.2' as const, retention: this.options.retention } : { version: '0.1' as const }),
         interactionKey: key,
         requestDigest: decoded.digest,
         requestEnvelope,
         acceptance,
-        task: submitted,
+        task: this.options.retention?.kind === 'licensed' ? projectReceiptTask(submitted) : submitted,
       };
       await this.store.save(record);
-      this.schedule(record);
-      return submitted;
+      this.schedule(record, true);
+      return this.responseTask(record);
     });
   }
 
-  private schedule(record: StoredTaskRecord<Envelope>): void {
+  private responseTask(record: StoredTaskRecord<Envelope>): A2ATask {
+    if (record.version === '0.1') return record.task;
+    const task = structuredClone(record.task);
+    const bytes = this.#bytes.read(task.id);
+    const city = asCityMetadata(task);
+    task.metadata = { 'org.nandacity': { ...city, retention: record.retention,
+      content: contentFinding(record.retention, this.options.now(), bytes !== undefined) } };
+    if (bytes && task.status.state === 'completed') task.artifacts![0]!.parts[0]!.data.answerBase64 = Buffer.from(bytes).toString('base64');
+    return task;
+  }
+
+  private async readTask(record: StoredTaskRecord<Envelope>): Promise<A2ATask> {
+    if ((record.version === '0.2' || this.options.live || this.options.execute?.retention) &&
+        record.task.status.state === 'submitted' && !this.#running.has(record.interactionKey)) {
+      record = await this.failWithoutCompletion(record, 'interrupted-unresolved');
+    } else this.schedule(record);
+    return this.responseTask(record);
+  }
+
+  private async persist(record: StoredTaskRecord<Envelope>): Promise<void> {
+    await this.store.save(record.version === '0.2' ? { ...record, task: projectReceiptTask(record.task) } : record);
+  }
+
+  private schedule(record: StoredTaskRecord<Envelope>, newlyAccepted = false): void {
+    // Legacy fixture persistence cannot contain newly licensed execution results.
+    if (record.version === '0.1' && (this.options.live || this.options.execute?.retention)) return;
+    if (record.version === '0.2' && !newlyAccepted) return;
     if (this.#closed || record.task.status.state !== 'submitted' || this.#running.has(record.interactionKey)) return;
     let resolveStart!: () => void;
     const start = new Promise<void>((resolve) => { resolveStart = resolve; });
@@ -315,8 +366,8 @@ class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
       status: { state: 'completed', timestamp: recordedAt },
       artifacts: [{
         artifactId: randomUUID(),
-        name: 'Nanda City synthetic evening plan',
-        description: 'Exact authored fixture bytes and linked signed completion.',
+        name: this.options.live ? 'Nanda City source-backed evening proposal' : 'Nanda City synthetic evening plan',
+        description: this.options.live ? 'Transient source-backed proposal with explicit gaps and linked signed completion.' : 'Exact authored fixture bytes and linked signed completion.',
         parts: [{
           kind: 'data',
           data: {
@@ -329,7 +380,8 @@ class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
       }],
       metadata: { 'org.nandacity': completedMetadata },
     };
-    await this.store.save({ ...record, task: completed });
+    await this.persist({ ...record, task: completed });
+    if (record.version === '0.2' && !this.#closed) this.#bytes.put(record.task.id, answerBytes, record.retention);
   }
 
   private async runExecutor(request: Request, record: StoredTaskRecord<Envelope>): Promise<Uint8Array> {
@@ -419,7 +471,7 @@ class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
       metadata: { 'org.nandacity': metadata },
     };
     const next = { ...record, task: failed };
-    await this.store.save(next);
+    await this.persist(next);
     return next;
   }
 
@@ -459,7 +511,7 @@ class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
       metadata: { 'org.nandacity': metadata },
     };
     const next = { ...record, task: failed };
-    await this.store.save(next);
+    await this.persist(next);
     return next;
   }
 
@@ -482,7 +534,7 @@ class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
       metadata: { 'org.nandacity': metadata },
     };
     const next = { ...record, task: failed };
-    await this.store.save(next);
+    await this.persist(next);
     return next;
   }
 }
@@ -545,7 +597,24 @@ export async function startLoopbackA2AService(options: LoopbackServiceOptions): 
 export async function startStrategyA2AService<Request extends RuntimeRequest, Envelope, Profile>(
   options: StrategyServiceOptions<Request, Envelope, Profile>,
 ): Promise<LoopbackA2AService> {
-  const executionTimeoutMs = options.executionTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS;
+  if (options.retention !== undefined) options = { ...options, retention: retentionSchema.parse(options.retention) };
+  if (options.execute?.retention !== undefined && options.live === undefined) {
+    throw new Error('source-bound executor requires explicit live admission');
+  }
+  if (options.live !== undefined) {
+    options = { ...options, live: liveAdmissionSchema.parse(options.live) };
+    if (!options.execute || options.retention?.kind !== 'licensed' || Date.parse(options.retention.expiresAt) <= Date.parse(options.now())) {
+      throw new Error('live requires an injected executor and unexpired licensed retention');
+    }
+  }
+  if (options.live !== undefined || options.execute?.retention !== undefined) {
+    const source = licensedRetentionSchema.safeParse(options.execute?.retention);
+    if (!source.success || options.retention?.kind !== 'licensed' ||
+        options.retention.policyId !== source.data.policyId || Date.parse(options.retention.expiresAt) > Date.parse(source.data.expiresAt)) {
+      throw new Error('runtime requires matching executor retention with no later expiry');
+    }
+  }
+  const executionTimeoutMs = options.executionTimeoutMs ?? (options.live ? MAX_EXECUTION_TIMEOUT_MS : DEFAULT_EXECUTION_TIMEOUT_MS);
   if (!Number.isSafeInteger(executionTimeoutMs) || executionTimeoutMs < 1 ||
       executionTimeoutMs > MAX_EXECUTION_TIMEOUT_MS) {
     throw new Error(`executionTimeoutMs must be an integer from 1 to ${MAX_EXECUTION_TIMEOUT_MS}`);
