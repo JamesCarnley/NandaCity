@@ -36,6 +36,48 @@ matching log in each requested range. Ordinary RPC cannot detect silently omitte
 events or prove its own completeness. Equal endpoints alone are insufficient.
 No history is promoted to cryptographic proof or independent signature existence.
 
+## Feedback authority epoch
+
+`readIdentityFeedbackEpoch` is a separate ranking-scoped observation over
+`(basis, observation]`. Unlike the live reader, it reads both numbered owner/URI
+boundaries itself. It decodes the basis registration, requires the selected
+agent locator, active authorization and `ownerAtPublication`, then projects the
+ordered URI, transfer and upgrade events against the independently read final
+owner and exact URI. Callers do not supply owner or URI snapshots to this API.
+
+A valid URI update is neutral when it keeps the tracked ERC-721 owner, runtime
+`receiptSigner` and active authorization. This permits declaration-level endpoint,
+card-digest and revision migration; the reader does not fetch intermediate cards
+or carry endpoint/card-specific admissions forward. Any transfer (including
+self-transfer or away-and-back), runtime signer replacement, or `active: false`
+permanently returns `retired`, even if later declarations restore the original
+values. Approved operators may publish URI updates because `updatedBy` is not
+the authority owner. The first retirement coordinate is retained as diagnostic
+evidence.
+
+An upgrade, malformed or stale-owner intermediate registration, contradictory
+event, missing chunk, exceeded bound, unsupported implementation, final-state
+disagreement or reorganization returns `unknown`. Unknown outranks a provisional
+retirement while retaining its `firstBreak`. URI event data and both boundary
+`tokenURI` returns are checked as exact ABI bytes before use: at most 64 KiB,
+canonical padding and no suffix, fatal UTF-8 decoding without stripping a BOM,
+followed by the existing strict 32 KiB registration codec. Each boundary header
+must match its expected number and hash before any owner or URI state call is
+dispatched. Every boundary RPC is independently guarded by the captured
+cancellation signal and invocation deadline, so a returned cancellation or
+deadline cannot start later snapshot work. Genesis, both boundaries and every
+referenced event block are rechecked. The same 4096-block, 1024-log,
+64-block-chunk and ten-second invocation bounds apply.
+
+The epoch reader accepts a supplied `PublicClient`; ranking composition must give
+that client the existing borrowed shared-lane bounded transport. The outer batch
+owns physical cancellation and aggregate call/byte/deadline limits. The result is
+`rpc-derived-not-state-proof`: it assumes complete RPC log responses and does not
+prove historical signature existence, card validity, endpoint liveness, service
+quality, current City eligibility, or finality. Existing `readIdentityContinuity`
+semantics remain intentionally stricter for live journeys: every URI edit still
+returns `changed`, including an otherwise neutral endpoint-only migration.
+
 Journey verification rechecks the exported `currentObservation` at its own
 numbered block, then reads latest separately. Successful reports retain both in
 `authorityObservations: { exported, latest }`; changed and unknown continuity

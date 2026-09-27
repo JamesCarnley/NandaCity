@@ -35,7 +35,10 @@ test('known reference continuity distinguishes unrelated blocks from no-op and a
         deployments.receipt(client, await wallet.writeContract({ address: domain.registry,
           abi: abi as Abi, functionName, args, chain: null }));
       await write('register');
-      await write('setAgentURI', [0n, 'data:,original']);
+      const original = deployments.published({ agentId: '0', owner, city: 'Chicago',
+        cardUrl: 'http://127.0.0.1:39001/card', invocationUrl: 'http://127.0.0.1:39001/a2a',
+        revision: 1, cardBytes: new Uint8Array(), agentURI: '' }, domain.chainId, domain.registry, true, owner.address);
+      await write('setAgentURI', [0n, original.agentURI]);
       await write('register');
       const basis = await readIdentitySnapshot(client, agent);
       const read = async (overrides: Record<string, unknown> = {}, rpc: PublicClient = client) =>
@@ -56,10 +59,16 @@ test('known reference continuity distinguishes unrelated blocks from no-op and a
           functionName: 'giveFeedback', args: [0n, -1n, 0, 'service', '', '', 'https://fixture.example/review', `0x${'12'.repeat(32)}`], chain: null }));
         assert.equal((await read()).status, 'unchanged');
       });
-      for (const scenario of ['same-uri', 'self-transfer', 'transfer-away-back', 'implementation-away-back'] as const) {
+      for (const scenario of ['same-uri', 'endpoint-only', 'self-transfer', 'transfer-away-back', 'implementation-away-back'] as const) {
         await t.test(scenario, async () => {
           const stable = await control.snapshot();
           if (scenario === 'same-uri') await write('setAgentURI', [0n, basis.agentURI]);
+          if (scenario === 'endpoint-only') {
+            const moved = deployments.published({ agentId: '0', owner, city: 'Chicago',
+              cardUrl: 'http://127.0.0.1:39002/card', invocationUrl: 'http://127.0.0.1:39002/a2a',
+              revision: 2, cardBytes: new Uint8Array(), agentURI: '' }, domain.chainId, domain.registry, true, owner.address);
+            await write('setAgentURI', [0n, moved.agentURI]);
+          }
           if (scenario === 'self-transfer') await write('transferFrom', [owner.address, owner.address, 0n]);
           if (scenario === 'transfer-away-back') {
             await write('transferFrom', [owner.address, other.address, 0n]);
