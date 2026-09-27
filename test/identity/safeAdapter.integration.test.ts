@@ -81,6 +81,28 @@ test('bounded Safe deployment, separate payer and exact registered effect on an 
     await assert.rejects(adapter.executeSafeDeployment(signed), /deployed|nonce|submitted/i);
     const kits = await Promise.all(ownerKeys.map((signer) => Safe.init({ provider: rpcUrl, signer,
       safeAddress: safe, isL1SafeSingleton: true, contractNetworks: protocolContractNetworks(network) })));
+    await t.test('owner rotation retains deployment provenance and validates an exact Safe-target effect', async () => {
+      const snapshot = await control.snapshot();
+      try {
+        const replacement = privateKeyToAccount(generatePrivateKey()).address;
+        const swap = await kits[1]!.createSwapOwnerTx({ oldOwnerAddress: owners[0]!.address, newOwnerAddress: replacement });
+        const call = { to: safe, value: '0', operation: 0, data: swap.data.data as Hex } as const;
+        const next = await adapter.prepareSingleCall(network, safe, call);
+        const execution = await adapter.prepareExecution(await adapter.approveSingleCall(next, kits[1]!), wallet);
+        const effect = await adapter.executePrepared(execution);
+        const currentOwners = [replacement, owners[1]!.address] as [Address, Address];
+        await adapter.validateStoredCall(execution, { network, account: prepared.account, payer: payer.address, call, currentOwners });
+        await assert.rejects(adapter.validateStoredCall(execution, { network, account: prepared.account, payer: payer.address, call }));
+        const read = await adapter.readSingleCallEffect(client, effect, call);
+        assert.ok(currentOwners.every((owner) => read.state.owners.includes(owner)));
+        await assert.rejects(adapter.readSafeExecutionEffect(client, effect, { domain, registryRuntimeCodeHash, call }));
+        await assert.rejects(adapter.validateStoredCall(execution, { network, account: { ...prepared.account, owners: currentOwners },
+          payer: payer.address, call, currentOwners }), /predicted/);
+        const fresh = await adapter.prepareSingleCall(network, safe, { ...call, data: '0x' });
+        assert.equal(fresh.nonce, next.nonce + 1);
+        await assert.rejects(adapter.approveSingleCall(fresh, kits[0]!), /current owner/);
+      } finally { await control.revert({ id: snapshot }); }
+    });
     const beforeRegistration = await control.snapshot();
     let firstExecution: Awaited<ReturnType<typeof adapter.executePrepared>> | undefined;
     for (let index = 0; index < 2; index++) await t.test(`owner ${index + 1} approves with unfunded owners and Safe`, async () => {

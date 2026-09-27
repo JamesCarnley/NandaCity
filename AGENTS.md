@@ -7,7 +7,12 @@ and two-Index integration suites: Anvil 1.7.1 must be on `PATH`, Docker must be
 available, and `NANDA_INDEX_CHECKOUT` must point to a clean checkout of the
 public pinned Index commit in `src/demo/indexProcesses.ts`. The harness builds
 that source before launching it. Tests use Node's test runner through `tsx`
-under `test/identity/`, `test/discovery/`, `test/interaction/`, and `test/feedback/`.
+under `test/identity/`, `test/discovery/`, `test/interaction/`, `test/feedback/`
+and `test/reputation/`. Unit and full checks also require `NANDATOWN_CHECKOUT`
+at the clean public Town pin and `NANDATOWN_PYTHON` pointing to the Python 3.12.13
+virtual-environment entry, not its resolved global target. Use the exact pins
+and separate editable-install setup in [README](README.md#setup-and-checks) and
+[the CI workflow](.github/workflows/unit.yml).
 
 Tests should exercise the real codec and verifier with complete literal fixtures.
 For behavior changes, add a focused failing test first, observe the expected
@@ -16,8 +21,8 @@ authority checks with mocks.
 
 ## Current code boundary
 
-This repository currently owns the identity/profile foundation, local
-discovery demonstration, and pure signed-interaction format:
+This repository owns local identity, discovery, signed interaction, explained
+ranking and generated-credential account/recovery demonstrations:
 
 - bounded ERC-8004 registration-v1 data-URI decoding and encoding;
 - City's strict `x-nandacity` application profile;
@@ -51,6 +56,15 @@ discovery demonstration, and pure signed-interaction format:
   composition that rebuilds original authority at the request's signed numbered
   basis, separately from publication/revocation and without a live provider;
   private requests/cards are not returned in its findings or uploaded to Indexes; and
+- v0.2 feedback commitments to exact private supporting-bundle bytes, qualified
+  pre-retirement history composition and conservative ranking carry-forward;
+  absent/substituted commitments cannot supply private authority findings,
+  transfers never qualify, and legacy retired v0.1 remains excluded; and
+- a bounded stock-Safe adapter with separate preparation/approval/execution,
+  durable two-service onboarding, a separate existing-ID migration journal,
+  encrypted V3 backup and [clean-process exit proof](docs/safe-exit.md);
+  immutable deployment provenance stays separate from current owner policy,
+  and the retained-attacker revocation proof is separately labelled; and
 - an owned loopback A2A 0.3 JSON-RPC subset with durable `message/send` and
   `tasks/get` tasks; and
 - one synthetic Chicago Index → AgentCard → A2A journey with separately
@@ -80,6 +94,12 @@ Do not turn caller-supplied continuity or current-profile inputs into claims
 of independently proven chain history. A signer-authored time is not proof of
 pre-retirement existence. Signature validity is distinct from authority and
 semantic quality. See [the City interaction format](docs/interaction-format.md).
+Committed history does not prove quality, use/compromise time, finality or future
+availability. Safe support is local generated EOA custody, threshold 1-of-2,
+with a separate runtime signer and non-owner payer; it is not passkey/connected
+wallet UX, ERC-1271 caller support or independent-operator custody. Pre-send
+canonical checks are observations, not atomic protection against later state
+changes. A malicious owner removing the backup defeats this loss-recovery model.
 
 Do not broaden the local write path to a public or non-loopback RPC. The demo
 fetches AgentCards only from its own exact loopback origin/paths; arbitrary

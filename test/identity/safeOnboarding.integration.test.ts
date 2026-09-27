@@ -55,7 +55,7 @@ test('one Safe resumes exact persisted actions across two city publications with
       let access = createJournalController(root, () => undefined).local;
       let childCount = 0;
       const childOperation = async (operation: 'reopen' | 'next' | 'approve' | 'resume', approval?: adapter.ApprovedSafeCall,
-        fault?: 'drop-request') => {
+        fault?: 'drop-request', barrier?: { hold: boolean; acquired?: () => void; attempted?: () => void; release: Promise<void> }) => {
         childCount++;
         const controller = createJournalController(root, () => undefined);
         const child = fork(new URL('./fixtures/safeOnboardingWorker.ts', import.meta.url), [], {
@@ -65,6 +65,8 @@ test('one Safe resumes exact persisted actions across two city publications with
         const result = new Promise<{ report: OnboardingReport; safeTxHash?: string }>((resolve, reject) => {
           let returned = false;
           child.on('message', (message) => {
+            if (message === 'barrier-acquired') barrier?.acquired?.();
+            if (message === 'barrier-attempt') barrier?.attempted?.();
             if (message && typeof message === 'object' && 'type' in message && message.type === 'result') {
               returned = true; resolve(message as unknown as { report: OnboardingReport; safeTxHash?: string });
             }
@@ -72,9 +74,36 @@ test('one Safe resumes exact persisted actions across two city publications with
           child.once('exit', () => { if (!returned) reject(new Error('owned onboarding caller exited without a result')); });
         });
         const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-        child.send({ ...childAccess, guard: undefined, mode: 'onboarding', config, operation, approval, fault });
+        if (barrier?.hold) void barrier.release.then(() => { if (child.connected) child.send('barrier-release'); });
+        child.send({ ...childAccess, guard: undefined, mode: 'onboarding', config, operation, approval, fault,
+          barrier: barrier ? (barrier.hold ? 'hold' : 'attempt') : undefined });
         try { const value = await result; await exited; return value; }
         finally { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; } }
+      };
+      const overlap = async (operation: 'next' | 'approve', approval?: adapter.ApprovedSafeCall) => {
+        let acquired!: () => void; let attempted!: () => void; let release!: () => void;
+        const acquiredSignal = new Promise<void>((resolve) => { acquired = resolve; });
+        const attemptedSignal = new Promise<void>((resolve) => { attempted = resolve; });
+        const releaseSignal = new Promise<void>((resolve) => { release = resolve; });
+        const bounded = async (signal: Promise<unknown>) => {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try { await Promise.race([signal, new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('owned lock-overlap barrier timed out')), 30_000);
+          })]); } finally { clearTimeout(timer); }
+        };
+        const holder = childOperation(operation, approval, undefined,
+          { hold: true, acquired, release: releaseSignal });
+        let contender: ReturnType<typeof childOperation> | undefined;
+        try {
+          await bounded(Promise.race([acquiredSignal, holder.then(() => { throw new Error('holder finished before acquired barrier'); })]));
+          contender = childOperation(operation, approval, undefined,
+            { hold: false, attempted, release: releaseSignal });
+          await bounded(Promise.race([attemptedSignal, contender.then(() => { throw new Error('contender omitted attempt barrier'); })]));
+          const denied = await contender; // Hold the real lock until the second actual operation returns.
+          assert.equal(denied.report.services[0]!.status, 'locked');
+          release();
+          return [await holder, denied];
+        } finally { release(); await Promise.allSettled([holder, ...(contender ? [contender] : [])]); }
       };
       const restart = async () => {
         access = createJournalController(root, () => undefined).local;
@@ -104,7 +133,7 @@ test('one Safe resumes exact persisted actions across two city publications with
       let beforeFinalPublication: `0x${string}` | undefined;
       for (const kind of ['register', 'publish', 'register', 'publish'] as const) {
         if (approvals === 0) {
-          const race = await Promise.all([childOperation('next'), childOperation('next')]);
+          const race = await overlap('next');
           assert.equal(race.filter((value) => value.report.services[0]!.status === 'locked').length, 1);
           assert.equal(race.filter((value) => value.safeTxHash !== undefined).length, 1);
         }
@@ -118,7 +147,7 @@ test('one Safe resumes exact persisted actions across two city publications with
         assert.equal(same.action.prepared.safeTxHash, hash);
         const approval = await adapter.approveSingleCall(next.action.prepared, kit); approvals++;
         if (approvals === 1) {
-          const race = await Promise.all([childOperation('approve', approval), childOperation('approve', approval)]);
+          const race = await overlap('approve', approval);
           assert.equal(race.filter((value) => value.report.services[0]!.status === 'locked').length, 1);
         } else await onboarding.recordApproval(config, access, approval);
         await restart();

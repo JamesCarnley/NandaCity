@@ -104,7 +104,8 @@ async function canonicalBlock(client: PublicClient, blockNumber: bigint, blockHa
 
 /** Independently reusable configuration read-back; RPC-derived, not finality or a state proof. */
 export async function readSafeAccount(networkInput: SafeNetworkConfig, safe: Address,
-  expected?: SafeAccountDeploymentConfig, atBlock?: bigint): Promise<SafeAccountReadback> {
+  expected?: SafeAccountDeploymentConfig, atBlock?: bigint,
+  currentOwners?: readonly [Address, Address]): Promise<SafeAccountReadback> {
   const network = clone(networkInput); const client = localClient(network); requireAddress(safe);
   const blockNumber = atBlock ?? await client.getBlockNumber({ cacheTime: 0 });
   const block = await client.getBlock({ blockNumber });
@@ -134,10 +135,13 @@ export async function readSafeAccount(networkInput: SafeNetworkConfig, safe: Add
   if (expected) {
     validateAccount(network, expected);
     await predictedKit(network, expected);
-    if (!same(expected.predictedAddress, safe) || !expected.owners.every((owner) => owners.some((actual) => same(owner, actual)))) {
+    const expectedOwners = currentOwners ?? expected.owners;
+    if (expectedOwners.length !== 2 || same(expectedOwners[0], expectedOwners[1])) throw new Error('Safe current owners invalid');
+    expectedOwners.forEach(requireAddress);
+    if (!same(expected.predictedAddress, safe) || !expectedOwners.every((owner) => owners.some((actual) => same(owner, actual)))) {
       throw new Error('Safe deployed owners/address mismatch');
     }
-  }
+  } else if (currentOwners) throw new Error('Safe current owners require deployment provenance');
   await canonicalBlock(client, blockNumber, block.hash);
   return { network, safe: getAddress(safe), owners: [owners[0]!, owners[1]!], threshold: 1,
     fallbackHandler: network.contracts.fallbackHandler.address, modules: [], guard: zeroAddress,
@@ -199,7 +203,7 @@ export async function validateStoredDeployment(input: PreparedSafeDeployment | P
 }
 
 export type ExpectedSafeCall = { network: SafeNetworkConfig; account: SafeAccountDeploymentConfig;
-  call: SafeSingleCall; payer: Address };
+  call: SafeSingleCall; payer: Address; currentOwners?: readonly [Address, Address] };
 /** Historical validation intentionally does not require an unconsumed nonce. */
 export async function validateStoredCall(input: PreparedSafeCall | ApprovedSafeCall | PreparedSafeExecution,
   expected: ExpectedSafeCall, atBlock?: bigint): Promise<void> {
@@ -210,12 +214,12 @@ export async function validateStoredCall(input: PreparedSafeCall | ApprovedSafeC
     ...(signed ? ['payer', 'payerNonce', 'rawTransaction', 'transactionHash'] : [])]);
   if (!isDeepStrictEqual(input.network, expected.network) || !same(input.safe, expected.account.predictedAddress) ||
       !sameCall(input.call, expected.call)) throw new Error('Safe configured call mismatch');
-  const state = await readSafeAccount(expected.network, input.safe, expected.account, atBlock);
+  const state = await readSafeAccount(expected.network, input.safe, expected.account, atBlock, expected.currentOwners);
   if (approved) await validateApproval(input, state);
   if (signed) {
     if (!approved || !same(input.payer, expected.payer)) throw new Error('Safe configured payer mismatch');
     await validateOuter(expected.network, { to: input.safe, value: '0', data: input.executionCalldata }, input,
-      [...expected.account.owners, input.safe], false);
+      [...state.owners, input.safe], false);
   }
 }
 
@@ -416,12 +420,24 @@ export type ExpectedRegisteredAgent = {
 export async function readSafeExecutionEffect(client: PublicClient, input: PreparedSafeExecution | SafeExecution,
   expectedInput: ExpectedRegisteredAgent) {
   const execution = clone(input); const expected = clone(expectedInput); validatePrepared(execution);
-  if (clientUrl(client) !== execution.network.rpcUrl) throw new Error('Safe reader RPC mismatch');
   const { domain } = expected;
   if (domain.chainId !== execution.network.chainId || !same(domain.genesisHash, execution.network.genesisHash) ||
       !same(expected.call.to, domain.registry) ||
       !sameCall(expected.call, execution.call)) throw new Error('Safe expected call/domain mismatch');
   validateCall(expected.call); requireAddress(domain.registry);
+  const result = await readSingleCallEffect(client, execution, expected.call);
+  await readSafeRegistryConfiguration(client, expected, result.receipt.blockNumber);
+  await canonicalBlock(client, result.receipt.blockNumber, result.receipt.blockHash);
+  return result;
+}
+
+/** Exact outer/inner/canonical effect for one bounded call, including a Safe owner-management call.
+ * Does not assert a registry domain or infer any application-level effect. */
+export async function readSingleCallEffect(client: PublicClient, input: PreparedSafeExecution | SafeExecution,
+  expectedCall: SafeSingleCall) {
+  const execution = clone(input); validatePrepared(execution);
+  if (clientUrl(client) !== execution.network.rpcUrl) throw new Error('Safe reader RPC mismatch');
+  if (!sameCall(expectedCall, execution.call)) throw new Error('Safe expected call mismatch');
   const [receipt, transaction] = await Promise.all([
     client.getTransactionReceipt({ hash: execution.transactionHash }), client.getTransaction({ hash: execution.transactionHash }),
   ]);
@@ -439,7 +455,6 @@ export async function readSafeExecutionEffect(client: PublicClient, input: Prepa
   await validateOuter(execution.network, { to: execution.safe, value: '0', data: execution.executionCalldata }, execution,
     [...state.owners, execution.safe], false);
   successfulExecution(receipt, execution.safe, execution.safeTxHash);
-  await readSafeRegistryConfiguration(client, expected, receipt.blockNumber);
   await canonicalBlock(client, receipt.blockNumber, receipt.blockHash);
   return { receipt, state };
 }

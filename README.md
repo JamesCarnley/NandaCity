@@ -22,8 +22,17 @@ can be exported with its unabridged evidence JSON. See
 The [separate-client example](docs/external-client.md) runs a Node caller through
 Index discovery, exact card verification, and signed A2A invocation for either
 city, then the parent independently rechecks its exported evidence live.
-It does **not** provide public-chain deployment, real operator onboarding,
-reputation, an interactive user interface, or a deployed service.
+Local reputation is implemented as an [explained policy](docs/reputation-policy.md)
+with [bounded ranking evidence](docs/ranking-evidence.md) and independently read
+[accepted-reviewer coverage](docs/reputation-coverage.md). Its synthetic same-host,
+RPC-derived findings are not service quality, global history or independent trust.
+The [Safe backup and exit drill](docs/safe-exit.md) adds separate preparation,
+owner approval and non-owner execution, shared two-service onboarding, encrypted
+backup restore and same-account endpoint/runtime migration. It uses generated
+EOA-backed owners, threshold 1-of-2 and local infrastructure—not real custody,
+connected-wallet/passkey or ERC-1271 caller UX. Public-chain deployment, live city
+answers, real operator onboarding, an interactive UI and deployed services remain
+outside this prototype.
 
 The companion [NANDA Index fork](https://github.com/JamesCarnley/nanda-index-v2)
 provides exact per-service filtering and optional, read-only ERC-8004 following.
@@ -47,11 +56,14 @@ it does not fetch an AgentCard URL.
 - A clean checkout of public `JamesCarnley/nanda-index-v2` at pinned commit
   `416954077d408ab4de1e096414f004f02ee8ff10`, with `npm ci` run in its
   `server/` directory
+- Python 3.12.13 and a clean checkout of public `JamesCarnley/nandatown` at
+  `bf8f226b4d7ae9543bd73995c000c64c7dcd7e09`, installed editable into a separate
+  private virtual environment; `python3.12` below must be that exact version
 
-The earlier identity-only process workflow was verified on macOS and in
-[historical Linux CI](https://github.com/JamesCarnley/NandaCity/actions/runs/35251688937),
-including actual-Anvil tests. That run predates the two-Index discovery fixture;
-it is not Linux evidence for this milestone. Install the pinned Foundry release with:
+The checked-in [CI workflow](.github/workflows/unit.yml) provisions the pinned
+Index/Town sources and runtimes, then runs `npm run check`: typechecking, units,
+build and owned-chain/two-Index integration. This describes its configured gate,
+not a claim about the latest run. Install the pinned Foundry release with:
 
 ```sh
 foundryup --install v1.7.1
@@ -65,8 +77,15 @@ No paid account, hosted RPC, wallet, API key, or environment secret is needed.
 git clone https://github.com/JamesCarnley/nanda-index-v2 /absolute/path/to/nanda-index-v2
 git -C /absolute/path/to/nanda-index-v2 checkout 416954077d408ab4de1e096414f004f02ee8ff10
 npm ci --prefix /absolute/path/to/nanda-index-v2/server
+git clone https://github.com/JamesCarnley/nandatown /absolute/path/to/nandatown
+git -C /absolute/path/to/nandatown checkout bf8f226b4d7ae9543bd73995c000c64c7dcd7e09
+python3.12 --version
+(umask 077; python3.12 -m venv /absolute/path/to/town-venv)
+/absolute/path/to/town-venv/bin/python -m pip install -e /absolute/path/to/nandatown
 npm ci
 export NANDA_INDEX_CHECKOUT=/absolute/path/to/nanda-index-v2
+export NANDATOWN_CHECKOUT=/absolute/path/to/nandatown
+export NANDATOWN_PYTHON=/absolute/path/to/town-venv/bin/python
 npm test
 npm run test:integration
 npm run contracts:check
@@ -83,11 +102,15 @@ npm run demo:external-client -- --index-checkout "$NANDA_INDEX_CHECKOUT" --city 
 npm run demo:external-client -- --index-checkout "$NANDA_INDEX_CHECKOUT" --city Boston --json
 ```
 
-`NANDA_INDEX_CHECKOUT` is required for `npm run test:integration` and
-`npm run check`. Supply the checkout's canonical absolute path (for example,
+`NANDATOWN_CHECKOUT` and `NANDATOWN_PYTHON` are required for `npm test`,
+`npm run test:integration` and `npm run check`; `NANDA_INDEX_CHECKOUT` is required
+for the latter two. Keep `NANDATOWN_PYTHON` as the virtual environment's interpreter
+entry path—do not replace it with the resolved global Python target. See the
+[Town evidence boundary](docs/town-evidence.md). Supply canonical absolute
+checkout paths (for example,
 macOS `/private/tmp/...`, not its `/tmp/...` symlink; `realpath` can show it).
-The checkout must have the exact
-pinned commit and no tracked/untracked changes; the harness rebuilds its Index
+Both source checkouts must have their exact
+pinned commits and no tracked/untracked changes; the harness rebuilds its Index
 server from source before launch. The tests do not silently skip Anvil, Docker,
 or the Index checkout. `npm run check` runs typechecking, all unit tests, the
 production build, and the real-chain/Index integration suite. Generated TypeScript
@@ -209,11 +232,12 @@ compiler output.
 - `receiptSigner` is a separate runtime key authorized only for City's signed
   acceptance and completion statements. It is not an owner or payment key.
 
-The first owned Chicago journey now finds and invokes a fixture specialist and
-exports evidence plus an independent, stage-by-stage report. Portable feedback,
-real providers and live city data remain future work. Public-chain writes,
-Index deployment, additional signing schemes, transport authentication, and
-reputation remain outside this slice. The local Index connector and independent
+The first owned Chicago journey finds and invokes a fixture specialist and
+exports evidence plus an independent, stage-by-stage report. Portable feedback
+and local explained ranking are implemented separately; real providers and live
+city data remain future work. Public-chain writes, Index deployment, additional
+caller signing schemes and transport authentication remain outside this slice.
+The local Index connector and independent
 City verification are demonstrated; they are not a production metadata fetcher
 or a trust verdict. See the [journey](docs/chicago-journey.md) and
 [loopback A2A boundary](docs/a2a-loopback.md).

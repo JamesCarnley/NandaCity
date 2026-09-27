@@ -1,49 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import { constants, type BigIntStats } from 'node:fs';
-import { lstat, mkdir, open, realpath, rename, rmdir, unlink } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { lstat, mkdir, open, rename, rmdir, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
+import { privateDirectory as directory, syncPrivateDirectory as syncDirectory, sameInode,
+  readPrivateFile, writePrivateFile } from './privateFile.js';
 
 const limit = 2 * 1024 * 1024;
 const rejected = () => new Error('onboarding journal rejected');
 export class JournalLocked extends Error { constructor() { super('onboarding locked'); } }
 export type JournalAccess = { root: string; controller: string; caller: string; guard: () => void };
 const localStates = new WeakMap<JournalAccess, { enabled: boolean; active: number }>();
-const sameInode = (a: BigIntStats, b: BigIntStats) => a.dev === b.dev && a.ino === b.ino;
-const metadata = ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'mode', 'uid', 'nlink'] as const;
-
-async function directory(root: string): Promise<BigIntStats> {
-  if (!isAbsolute(root) || resolve(root) !== root || !process.getuid || await realpath(root) !== root) throw rejected();
-  const stat = await lstat(root, { bigint: true });
-  if (!stat.isDirectory() || (stat.mode & 0o777n) !== 0o700n || stat.uid !== BigInt(process.getuid())) throw rejected();
-  return stat;
-}
-async function syncDirectory(root: string) {
-  const handle = await open(root, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try { await handle.sync(); } finally { await handle.close(); }
-}
-async function readFile(root: string, name: string): Promise<Buffer | null> {
-  const parent = await directory(root); const path = join(root, name);
-  let entry;
-  try { entry = await lstat(path, { bigint: true }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
-  if (!entry.isFile() || entry.nlink !== 1n) throw rejected();
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const before = await handle.stat({ bigint: true });
-    if (!sameInode(before, entry) || !before.isFile() || before.nlink !== 1n || before.uid !== BigInt(process.getuid!()) ||
-        (before.mode & 0o777n) !== 0o600n || before.size > BigInt(limit)) throw rejected();
-    const buffer = Buffer.alloc(limit + 1); let length = 0;
-    for (;;) {
-      const { bytesRead } = await handle.read(buffer, length, Math.min(16384, buffer.length - length), null);
-      length += bytesRead; if (length > limit) throw rejected(); if (!bytesRead) break;
-    }
-    const after = await handle.stat({ bigint: true }); const named = await lstat(path, { bigint: true });
-    if (metadata.some((key) => before[key] !== after[key] || before[key] !== named[key]) ||
-        BigInt(length) !== before.size || !sameInode(parent, await directory(root))) throw rejected();
-    return buffer.subarray(0, length);
-  } finally { await handle.close(); }
-}
+const readFile = (root: string, name: string) => readPrivateFile(root, name, limit);
 
 /** The caller fixes this canonical account directory; it is never an ephemeral bundle. */
 export function createJournalController(root: string, guard: () => void) {
@@ -153,20 +120,7 @@ export async function withJournalLock<T, R>(access: JournalAccess, decode: (valu
       if (!sameInode(owned, await directory(lock))) throw new JournalLocked();
       const bytes = Buffer.from(JSON.stringify(decode(next)));
       if (bytes.length > limit) throw rejected();
-      const parent = await directory(access.root);
-      // Validate even an existing destination before replacing it.
-      await readFile(access.root, 'journal.json');
-      const temporary = join(access.root, `.journal-${randomUUID()}`);
-      const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-      try {
-        await handle.writeFile(bytes); await handle.sync();
-        const stat = await handle.stat({ bigint: true });
-        if (!stat.isFile() || stat.nlink !== 1n || stat.size !== BigInt(bytes.length) ||
-            (stat.mode & 0o777n) !== 0o600n || !sameInode(stat, await lstat(temporary, { bigint: true })) ||
-            !sameInode(parent, await directory(access.root))) throw rejected();
-      } finally { await handle.close(); }
-      try { await rename(temporary, join(access.root, 'journal.json')); await syncDirectory(access.root); }
-      catch { await unlink(temporary).catch(() => undefined); throw rejected(); }
+      await writePrivateFile(access.root, 'journal.json', bytes, limit);
     });
   } finally {
     if (state) state.active--;
