@@ -60,6 +60,15 @@ type SolcOutput = {
   }>;
 };
 
+type CompilerMemo = Readonly<{
+  solcVersion: string;
+  input: string;
+  imports: Readonly<Record<string, string>>;
+  artifacts: ReferenceArtifacts;
+}>;
+
+let compilerMemo: CompilerMemo | undefined;
+
 export type ContractArtifact = {
   abi: Abi;
   bytecode: Hex;
@@ -99,8 +108,7 @@ function readSource(sourceUnit: string): string {
   return readFileSync(path, 'utf8');
 }
 
-function assertPinnedInputs(entrySources: Record<string, string>): void {
-  const solcVersion = solc.version();
+function assertPinnedInputs(entrySources: Record<string, string>, solcVersion: string): void {
   if (!solcVersion.startsWith('0.8.24+commit.e11b9ed9.')) {
     throw new Error(`expected solc 0.8.24, received ${solcVersion}`);
   }
@@ -148,6 +156,14 @@ function assertPinnedInputs(entrySources: Record<string, string>): void {
   }
 }
 
+function freezeDeep<T>(value: T): T {
+  if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const nested of Object.values(value)) freezeDeep(nested);
+  }
+  return value;
+}
+
 function toArtifact(
   output: SolcOutput,
   sourceUnit: string,
@@ -187,93 +203,130 @@ function artifactHash(artifact: ContractArtifact): string {
 }
 
 export function compileReferenceContracts(): ReferenceArtifacts {
-  const entrySources = Object.fromEntries(
-    Object.keys(expectedSourceHashes).map((sourceUnit) => [sourceUnit, readSource(sourceUnit)]),
-  );
-  assertPinnedInputs(entrySources);
-
-  const input = {
-    language: 'Solidity',
-    sources: Object.fromEntries(
-      Object.entries(entrySources).map(([sourceUnit, content]) => [sourceUnit, { content }]),
-    ),
-    settings: {
-      evmVersion: 'shanghai',
-      optimizer: { enabled: true, runs: 200 },
-      viaIR: true,
-      outputSelection: {
-        '*': {
-          '*': ['abi', 'evm.bytecode.object', 'evm.deployedBytecode.object'],
-        },
-      },
-    },
-  } as const;
-
-  const output = JSON.parse(
-    solc.compile(JSON.stringify(input), {
-      import(importPath) {
-        try {
-          return { contents: readSource(importPath) };
-        } catch {
-          return { error: `dependency source not found: ${importPath}` };
-        }
-      },
-    }),
-  ) as SolcOutput;
-  const errors =
-    output.errors?.filter((entry) => entry.severity === 'error').map(
-      (entry) => entry.formattedMessage ?? entry.message ?? 'unknown compiler error',
-    ) ?? [];
-  if (errors.length > 0) {
-    throw new Error(`reference contract compilation failed:\n${errors.join('\n')}`);
-  }
-
-  const identityRegistry = toArtifact(
-    output,
-    identitySourceUnit,
-    'IdentityRegistryUpgradeable',
-  );
-  const reputationRegistry = toArtifact(
-    output,
-    reputationSourceUnit,
-    'ReputationRegistryUpgradeable',
-  );
-  const minimalUups = toArtifact(output, minimalSourceUnit, 'HardhatMinimalUUPS');
-  const erc1967Proxy = toArtifact(output, proxySourceUnit, 'ERC1967Proxy');
-  const artifactSha256 = {
-    IdentityRegistryUpgradeable: artifactHash(identityRegistry),
-    ReputationRegistryUpgradeable: artifactHash(reputationRegistry),
-    HardhatMinimalUUPS: artifactHash(minimalUups),
-    ERC1967Proxy: artifactHash(erc1967Proxy),
-  };
-  for (const [contractName, expectedHash] of Object.entries(expectedArtifactHashes)) {
-    const actualHash = artifactSha256[contractName as keyof typeof artifactSha256];
-    if (actualHash !== expectedHash) {
-      throw new Error(
-        `artifact hash mismatch for ${contractName}: expected ${expectedHash}, received ${actualHash}`,
-      );
-    }
-  }
-
-  return {
-    identityRegistry,
-    reputationRegistry,
-    minimalUups,
-    erc1967Proxy,
-    provenance: {
-      referenceCommit: 'b9e466c250744a7e06b13dff9d3c2844ed64f825',
-      solcVersion: solc.version(),
-      solcTmpVersion: '0.2.7',
-      openZeppelinVersion: '5.4.0',
-      compilerSettings: {
+  let entrySources: Record<string, string>;
+  let solcVersion: string;
+  let input: string;
+  try {
+    entrySources = Object.fromEntries(
+      Object.keys(expectedSourceHashes).map((sourceUnit) => [sourceUnit, readSource(sourceUnit)]),
+    );
+    solcVersion = solc.version();
+    assertPinnedInputs(entrySources, solcVersion);
+    input = JSON.stringify({
+      language: 'Solidity',
+      sources: Object.fromEntries(
+        Object.entries(entrySources).map(([sourceUnit, content]) => [sourceUnit, { content }]),
+      ),
+      settings: {
         evmVersion: 'shanghai',
         optimizer: { enabled: true, runs: 200 },
         viaIR: true,
+        outputSelection: {
+          '*': {
+            '*': ['abi', 'evm.bytecode.object', 'evm.deployedBytecode.object'],
+          },
+        },
       },
-      sourceSha256: Object.fromEntries(
-        Object.entries(entrySources).map(([sourceUnit, content]) => [sourceUnit, sha256(content)]),
-      ),
-      artifactSha256,
-    },
-  };
+    } as const);
+  } catch (error) {
+    compilerMemo = undefined;
+    throw error;
+  }
+
+  const memo = compilerMemo;
+  if (memo !== undefined && memo.solcVersion === solcVersion && memo.input === input) {
+    let importsMatch = true;
+    try {
+      importsMatch = Object.entries(memo.imports).every(
+        ([sourceUnit, contents]) => readSource(sourceUnit) === contents,
+      );
+    } catch {
+      importsMatch = false;
+    }
+    if (importsMatch) return structuredClone(memo.artifacts);
+  }
+  compilerMemo = undefined;
+
+  try {
+    const imports: Record<string, string> = {};
+    const output = JSON.parse(
+      solc.compile(input, {
+        import(importPath) {
+          try {
+            const contents = readSource(importPath);
+            imports[importPath] = contents;
+            return { contents };
+          } catch {
+            return { error: `dependency source not found: ${importPath}` };
+          }
+        },
+      }),
+    ) as SolcOutput;
+    const errors =
+      output.errors?.filter((entry) => entry.severity === 'error').map(
+        (entry) => entry.formattedMessage ?? entry.message ?? 'unknown compiler error',
+      ) ?? [];
+    if (errors.length > 0) {
+      throw new Error(`reference contract compilation failed:\n${errors.join('\n')}`);
+    }
+
+    const identityRegistry = toArtifact(
+      output,
+      identitySourceUnit,
+      'IdentityRegistryUpgradeable',
+    );
+    const reputationRegistry = toArtifact(
+      output,
+      reputationSourceUnit,
+      'ReputationRegistryUpgradeable',
+    );
+    const minimalUups = toArtifact(output, minimalSourceUnit, 'HardhatMinimalUUPS');
+    const erc1967Proxy = toArtifact(output, proxySourceUnit, 'ERC1967Proxy');
+    const artifactSha256 = {
+      IdentityRegistryUpgradeable: artifactHash(identityRegistry),
+      ReputationRegistryUpgradeable: artifactHash(reputationRegistry),
+      HardhatMinimalUUPS: artifactHash(minimalUups),
+      ERC1967Proxy: artifactHash(erc1967Proxy),
+    };
+    for (const [contractName, expectedHash] of Object.entries(expectedArtifactHashes)) {
+      const actualHash = artifactSha256[contractName as keyof typeof artifactSha256];
+      if (actualHash !== expectedHash) {
+        throw new Error(
+          `artifact hash mismatch for ${contractName}: expected ${expectedHash}, received ${actualHash}`,
+        );
+      }
+    }
+
+    const artifacts: ReferenceArtifacts = {
+      identityRegistry,
+      reputationRegistry,
+      minimalUups,
+      erc1967Proxy,
+      provenance: {
+        referenceCommit: 'b9e466c250744a7e06b13dff9d3c2844ed64f825',
+        solcVersion,
+        solcTmpVersion: '0.2.7',
+        openZeppelinVersion: '5.4.0',
+        compilerSettings: {
+          evmVersion: 'shanghai',
+          optimizer: { enabled: true, runs: 200 },
+          viaIR: true,
+        },
+        sourceSha256: Object.fromEntries(
+          Object.entries(entrySources).map(([sourceUnit, content]) => [sourceUnit, sha256(content)]),
+        ),
+        artifactSha256,
+      },
+    };
+    compilerMemo = Object.freeze({
+      solcVersion,
+      input,
+      imports: Object.freeze({ ...imports }),
+      artifacts: freezeDeep(artifacts),
+    });
+    return structuredClone(compilerMemo.artifacts);
+  } catch (error) {
+    compilerMemo = undefined;
+    throw error;
+  }
 }

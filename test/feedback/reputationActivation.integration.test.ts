@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import test from 'node:test';
 import { createPublicClient, createTestClient, createWalletClient, custom, encodeFunctionData,
   http, keccak256, parseAbi, parseEther, toEventSelector, type Address, type Hex,
@@ -17,6 +20,10 @@ const initialized = toEventSelector('Initialized(uint64)');
 const otherHash = `0x${'ab'.repeat(32)}` as Hex;
 const otherAddress = '0x1111111111111111111111111111111111111111';
 type Rpc = { method: string; params?: readonly unknown[] };
+const execFileAsync = promisify(execFile);
+const compilerReuseWorker = fileURLToPath(
+  new URL('../identity/fixtures/compilerReuseWorker.ts', import.meta.url),
+);
 
 // Only malformed/unavailable responses are doubled; successful evidence comes
 // from the real owned chain and all codecs/code hashes execute normally.
@@ -163,14 +170,24 @@ test('authenticates the exact reference activation and rejects gaps or changed p
       assert.equal(result.activation, 'unavailable');
       assert.ok(result.diagnostics.includes('rpc-timeout'));
     });
-    await t.test('the total deadline includes synchronous pinned compilation', async () => {
-      let requests = 0;
-      const result = await read({ ...input, limits: { totalTimeoutMs: 1 }, client: boundary(client, (_request, value) => {
-        requests++; return value;
-      }) });
-      assert.equal(result.activation, 'unavailable');
-      assert.ok(result.diagnostics.includes('total-timeout'));
-      assert.equal(requests, 0);
+    await t.test('cold compilation and warm validation consume the deadline before RPC', async () => {
+      const { stdout, stderr } = await execFileAsync(
+        process.execPath,
+        ['--import', 'tsx', compilerReuseWorker, 'deadlines', JSON.stringify({
+          provenance: p,
+          observation: {
+            blockNumber: observation.blockNumber.toString(),
+            blockHash: observation.blockHash,
+          },
+        })],
+        { timeout: 120_000, maxBuffer: 1024 * 1024 },
+      );
+      assert.equal(stderr, '');
+      assert.deepEqual(JSON.parse(stdout), {
+        cold: { compileCalls: 1, rpcCalls: 0, diagnostic: 'total-timeout' },
+        warm: { compileCalls: 1, rpcCalls: 0, diagnostic: 'total-timeout' },
+        cancelled: { compileCalls: 1, rpcCalls: 0, diagnostic: 'cancelled' },
+      });
     });
     await t.test('every numbered basis including genesis is rechecked at completion', async () => {
       const calls = new Map<string, number>();
