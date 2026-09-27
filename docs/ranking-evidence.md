@@ -15,6 +15,21 @@ all nested work, including native Town subprocesses. The adapter then
 runs `calculatePolicy` and performs an additional uncached read of the exact
 observation block as its last external read.
 
+For v0.2 feedback, it also hashes the original validated private bundle bytes and
+independently composes committed-before-runtime-retirement qualification. Even
+same-epoch v0.2 feedback needs a matching bundle commitment. Missing bytes remain
+unknown; substituted bytes cannot inherit the legacy v0.1 path. A retained
+public negative review is not erased by a wrong private bundle: the adapter keeps
+its public signature/publication facts, withholds uncommitted private projections,
+and leaves policy eligibility unresolved rather than declaring a newcomer. The earliest
+canonical matching document anchor supplies one qualification/basis shared by all
+duplicates; later publications do not refresh age or bypass revocation. Retired
+v0.1 remains excluded. Transfers, deauthorization/reactivation, incomplete history
+and reorgs cannot qualify runtime carry-forward. The epoch remains `retired`.
+The sanitized slot sidecar exposes commitment classification, controlled reasons
+and public digest/block bases only. This work borrows the same aggregate read
+budget; neither caller verdicts nor Index assertions establish qualification.
+
 ```ts
 import { readRankingEvidence } from '../src/reputation/evidence.js';
 

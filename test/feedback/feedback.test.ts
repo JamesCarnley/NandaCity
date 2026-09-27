@@ -13,9 +13,36 @@ import { verifyHistoricalFeedback } from '../../src/feedback/verify.js';
 import type { CityFeedback } from '../../src/feedback/schema.js';
 
 const registry = { chainId: 11155111, address: '0x9999999999999999999999999999999999999999' } as const;
+
+test('v0.2 requires an exact bundle commitment and selects only its own signature domain', async () => {
+  const f = makeInteractionFixture();
+  const value = { ...feedbackFor(f), version: '0.2' as const, supportingBundleDigest: `0x${'aa'.repeat(32)}` };
+  const encoded = encodeFeedback(value);
+  const envelope = await signFeedback(value, f.caller);
+  assert.equal(envelope.version, '0.1');
+  assert.equal((await verifyFeedbackSignature(envelope, registry.chainId)).status, 'valid');
+  const legacySignature = await f.caller.signTypedData({
+    domain: { name: 'NandaCityFeedback', version: '0.1', chainId: registry.chainId },
+    primaryType: 'CityFeedback', types: { CityFeedback: [{ name: 'payloadDigest', type: 'bytes32' }] },
+    message: { payloadDigest: encoded.digest },
+  });
+  assert.equal((await verifyFeedbackSignature({ ...envelope, signature: legacySignature }, registry.chainId)).status, 'invalid');
+  const legacy = await signFeedback(feedbackFor(f), f.caller);
+  const modernSignature = await f.caller.signTypedData({
+    domain: { name: 'NandaCityFeedback', version: '0.2', chainId: registry.chainId },
+    primaryType: 'CityFeedback', types: { CityFeedback: [{ name: 'payloadDigest', type: 'bytes32' }] },
+    message: { payloadDigest: encodeFeedback(feedbackFor(f)).digest },
+  });
+  assert.equal((await verifyFeedbackSignature({ ...legacy, signature: modernSignature }, registry.chainId)).status, 'invalid');
+  const { supportingBundleDigest: _, ...absent } = value;
+  assert.throws(() => decodeFeedback(new TextEncoder().encode(JSON.stringify(absent))));
+  assert.throws(() => encodeFeedback({ ...value, supportingBundleDigest: `0x${'AA'.repeat(32)}` }));
+  assert.throws(() => encodeFeedback({ ...value, version: '0.1' }));
+  assert.throws(() => decodeFeedback(new TextEncoder().encode(JSON.stringify({ ...value, version: '0.3' }))));
+});
 const literal = '{"kind":"feedback","version":"0.1","service":{"method":"erc8004","agent":{"chainId":31337,"registry":"0x1111111111111111111111111111111111111111","agentId":"7"}},"reviewer":{"method":"eip155-eoa","chainId":31337,"address":"0x2222222222222222222222222222222222222222"},"interactionId":"0xabababababababababababababababababababababababababababababababab","requestDigest":"0x3333333333333333333333333333333333333333333333333333333333333333","acceptanceDigest":"0x4444444444444444444444444444444444444444444444444444444444444444","reputationRegistry":{"chainId":31337,"address":"0x5555555555555555555555555555555555555555"},"rubric":"evening-plan-usefulness-v0.1","value":1,"createdAt":"2026-09-24T13:02:00Z","result":{"kind":"no-result-observed","observedAt":"2026-09-24T13:01:00Z"}}';
 
-function feedbackFor(f: ReturnType<typeof makeInteractionFixture>): CityFeedback {
+function feedbackFor(f: ReturnType<typeof makeInteractionFixture>): Extract<CityFeedback, { version: '0.1' }> {
   const acceptance = { ...f.acceptance, requestDigest: encodeStatement(f.request).digest };
   return {
     kind: 'feedback', version: '0.1', service: f.request.service,
@@ -112,7 +139,7 @@ test('historical evaluator retains valid expired feedback without current owner 
 test('historical evaluator separates signature, reviewer, service, registry and digest/link failures', async () => {
   const c = await chain();
   const value = feedbackFor(c.f);
-  const examine = async (change: Partial<CityFeedback>) => verifyHistoricalFeedback({
+  const examine = async (change: Partial<ReturnType<typeof feedbackFor>>) => verifyHistoricalFeedback({
     ...c, feedback: await signFeedback({ ...value, ...change }, c.f.caller),
     basisProfile: c.f.profile, expectedReputationRegistry: registry,
   });

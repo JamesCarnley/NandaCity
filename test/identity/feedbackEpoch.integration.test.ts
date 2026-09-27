@@ -66,6 +66,7 @@ test('reference registry feedback authority epoch projects complete declaration 
           basis: coordinate, observation: coordinate, limits: { maxBlocks: 128, maxLogs: 64 } });
         assert.deepEqual(result, {
           epoch: 'same', qualification: 'rpc-derived-not-state-proof',
+          ownerEpoch: 'uninterrupted', deauthorization: 'absent',
           basis: { blockNumber: publication.blockNumber.toString(), blockHash: publication.blockHash },
           observation: { blockNumber: publication.blockNumber.toString(), blockHash: publication.blockHash },
           diagnostics: [],
@@ -159,6 +160,10 @@ test('reference registry feedback authority epoch projects complete declaration 
           const back = await write('setAgentURI', [0n, profile(3).agentURI]);
           const result = await readThrough(back.blockNumber, back.blockHash);
           assert.equal(result.epoch, 'retired');
+          assert.equal(result.ownerEpoch, 'uninterrupted');
+          assert.equal(result.deauthorization, 'absent');
+          assert.deepEqual(result.firstRuntimeRetirement, { blockNumber: away.blockNumber.toString(),
+            blockHash: away.blockHash, transactionIndex: away.transactionIndex, logIndex: 1 });
           assert.deepEqual(result.firstBreak, { blockNumber: away.blockNumber.toString(),
             transactionIndex: away.transactionIndex, logIndex: 1, kind: 'runtime-replaced' });
         });
@@ -200,6 +205,7 @@ test('reference registry feedback authority epoch projects complete declaration 
           const head = await client.getBlock({ blockTag: 'latest' });
           const result = await readThrough(head.number, head.hash);
           assert.equal(result.epoch, 'retired', scenario);
+          assert.equal(result.ownerEpoch, 'transferred');
           assert.deepEqual(result.firstBreak, { blockNumber: first.blockNumber.toString(),
             transactionIndex: first.transactionIndex, logIndex: 1, kind: 'transfer' });
         });
@@ -213,6 +219,22 @@ test('reference registry feedback authority epoch projects complete declaration 
           assert.equal(result.epoch, 'retired');
           assert.deepEqual(result.firstBreak, { blockNumber: off.blockNumber.toString(),
             transactionIndex: off.transactionIndex, logIndex: 1, kind: 'deauthorized' });
+          assert.equal(result.deauthorization, 'observed');
+        });
+      });
+
+      await t.test('whole interval retains transfers and deauthorization after the first runtime break', async () => {
+        await isolated(async () => {
+          const replacement = privateKeyToAccount(generatePrivateKey());
+          const away = await write('setAgentURI', [0n, profile(2, replacement.address).agentURI]);
+          await write('transferFrom', [owner.address, owner.address, 0n]);
+          await write('setAgentURI', [0n, profile(3, replacement.address, false).agentURI]);
+          const back = await write('setAgentURI', [0n, profile(4).agentURI]);
+          const result = await readThrough(back.blockNumber, back.blockHash);
+          assert.equal(result.firstBreak?.kind, 'runtime-replaced');
+          assert.equal(result.firstRuntimeRetirement?.blockHash, away.blockHash);
+          assert.equal(result.ownerEpoch, 'transferred');
+          assert.equal(result.deauthorization, 'observed');
         });
       });
 

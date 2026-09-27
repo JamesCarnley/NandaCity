@@ -22,7 +22,7 @@ import { listenOwnedServer } from '../../src/demo/twoIndexes.js';
 import { encodeFeedbackDocument } from '../../src/feedback/document.js';
 import { readIndexFeedbackHistory } from '../../src/feedback/indexClient.js';
 import { reputationRegistryAbi } from '../../src/feedback/registry.js';
-import { encodeSupportingBundle } from '../../src/feedback/supportingBundle.js';
+import { commitSupportingBundle, encodeSupportingBundle } from '../../src/feedback/supportingBundle.js';
 import { digestBytes } from '../../src/identity/profile.js';
 import { readIdentitySnapshot } from '../../src/identity/registry.js';
 import { verifyProfile } from '../../src/identity/verify.js';
@@ -486,7 +486,7 @@ test('fresh consumers independently map retained signed reviews and missing priv
       response.setHeader('content-type', 'application/json'); response.end(bytes ?? '{}');
     });
     const documentOrigin = await listenOwnedServer(server);
-    const urls = [`${documentOrigin}/low`, `${documentOrigin}/revoked`, `${documentOrigin}/missing`, `${documentOrigin}/current`];
+    const urls = [`${documentOrigin}/low`, `${documentOrigin}/revoked`, `${documentOrigin}/missing`, `${documentOrigin}/current`, `${documentOrigin}/legacy`];
     try {
       await withSixServiceFixture(indexCheckout, async (fixture) => {
         assert.ok(fixture.feedback);
@@ -497,7 +497,12 @@ test('fresh consumers independently map retained signed reviews and missing priv
           const request = decodeEnvelope(interaction.request).statement;
           const acceptance = decodeEnvelope(interaction.acceptance).statement;
           const completion = decodeEnvelope(interaction.completion).statement;
-          const document = encodeFeedbackDocument(await fixture.feedback!.sign({ kind: 'feedback', version: '0.1',
+          const bundle = commitSupportingBundle(encodeSupportingBundle({ version: '0.1',
+            request: interaction.request, acceptance: interaction.acceptance, completion: interaction.completion,
+            cardBase64: Buffer.from(service.cardBytes).toString('base64') }).bytes);
+          const document = encodeFeedbackDocument(await fixture.feedback!.sign({ kind: 'feedback',
+            ...(path === '/legacy' || path === '/revoked' ? { version: '0.1' as const }
+              : { version: '0.2' as const, supportingBundleDigest: bundle.digest }),
             service: interaction.requestValue.service, reviewer: interaction.requestValue.caller,
             interactionId: interaction.requestValue.interactionId, requestDigest: request.digest,
             acceptanceDigest: acceptance.digest,
@@ -513,25 +518,26 @@ test('fresh consumers independently map retained signed reviews and missing priv
             originalProfile: { agent: service.agent, agentURI: snapshot.agentURI, cardBytes: service.cardBytes },
             request: interaction.request, acceptance: interaction.acceptance, completion: interaction.completion });
           return { document, interaction, submission, originalProfile: { agent: service.agent,
-            agentURI: snapshot.agentURI, cardBytes: service.cardBytes }, bundle: encodeSupportingBundle({ version: '0.1',
-            request: interaction.request, acceptance: interaction.acceptance, completion: interaction.completion,
-            cardBase64: Buffer.from(service.cardBytes).toString('base64') }) };
+            agentURI: snapshot.agentURI, cardBytes: service.cardBytes }, bundle };
         };
         const low = await publish(chicago[0]!, '/low', 1);
-        await fixture.feedback.publish({ document: low.document.bytes, feedbackURI: `${documentOrigin}/low`,
-          originalProfile: low.originalProfile, request: low.interaction.request,
-          acceptance: low.interaction.acceptance, completion: low.interaction.completion });
         const revoked = await publish(chicago[0]!, '/revoked', 1);
         await fixture.feedback.revoke(revoked.submission.receipt.transactionHash);
         const missing = await publish(chicago[1]!, '/missing', 1);
         const current = await publish(chicago[2]!, '/current', 1);
+        const legacy = await publish(chicago[0]!, '/legacy', 1);
         await Promise.all([waitForHistory(fixture, chicago[0]!, 3), waitForHistory(fixture, chicago[1]!, 1),
           waitForHistory(fixture, chicago[2]!, 1)]);
         await retireAndRestoreRuntime(fixture, chicago[0]!);
+        await fixture.feedback.publish({ document: low.document.bytes, feedbackURI: `${documentOrigin}/low`,
+          originalProfile: low.originalProfile, request: low.interaction.request,
+          acceptance: low.interaction.acceptance, completion: low.interaction.completion });
+        await waitForHistory(fixture, chicago[0]!, 4);
         await fixture.indexes.stop('A');
         await withPrivateBundleFile(low.bundle.bytes, async (lowPath) => {
           await withPrivateBundleFile(revoked.bundle.bytes, async (revokedPath) => {
             await withPrivateBundleFile(current.bundle.bytes, async (currentPath) => {
+              await withPrivateBundleFile(legacy.bundle.bytes, async (legacyPath) => {
           const observation = await fixture.chain.getBlock();
           const curator = 'fixture-curator';
           const raw = { rpcOrigin: fixture.rpcOrigin, provenance: fixture.feedback!.provenance,
@@ -546,17 +552,21 @@ test('fresh consumers independently map retained signed reviews and missing priv
             privateBundleFiles: [{ documentHash: low.document.documentHash, path: lowPath },
               { documentHash: revoked.document.documentHash, path: revokedPath },
               { documentHash: current.document.documentHash, path: currentPath },
+              { documentHash: legacy.document.documentHash, path: legacyPath },
               { documentHash: missing.document.documentHash, path: null }],
             curatorInclusions: fixture.services.map(({ agent }) => ({ curator, agent })) };
           const first = await freshConsumer(raw), second = await freshConsumer(raw);
           assert.deepEqual(second, first);
           assert.ok(first.policyInput); assert.ok(first.policyResult);
-          assert.equal(first.policyInput.reviews.length, 5);
-          assert.equal(first.policyResult.selection.rated.length, 1);
+          assert.equal(first.policyInput.reviews.length, 6);
+          assert.equal(first.policyResult.selection.rated.length, 2);
           assert.equal(first.policyResult.selection.unresolved.length, 1);
-          assert.equal(first.policyResult.selection.unassessed.length, 1);
+          assert.equal(first.policyResult.selection.unassessed.length, 0);
           const lowReview = first.policyInput.reviews.find((review) => review.documentDigest === low.document.documentHash);
           assert.equal(lowReview?.checks.result, 'signed-completion'); assert.equal(lowReview?.epoch, 'retired');
+          assert.equal(lowReview?.historyQualification, 'committed-before-runtime-retirement');
+          const lowDuplicates = first.policyInput.reviews.filter((review) => review.documentDigest === low.document.documentHash);
+          assert.deepEqual(lowDuplicates.map((review) => review.historyBasis), [lowReview?.historyBasis, lowReview?.historyBasis]);
           const currentReview = first.policyInput.reviews.find((review) => review.documentDigest === current.document.documentHash);
           assert.equal(currentReview?.epoch, 'same');
           const missingReview = first.policyInput.reviews.find((review) => review.documentDigest === missing.document.documentHash);
@@ -565,15 +575,92 @@ test('fresh consumers independently map retained signed reviews and missing priv
             `eip155:${chicago[0]!.agent.chainId}/erc721:${chicago[0]!.agent.registry.toLowerCase()}/${chicago[0]!.agent.agentId}`);
           assert.ok(target?.reviews.some((review) => review.reason === 'duplicate-publication'));
           assert.ok(target?.reviews.some((review) => review.reason === 'retired-authority'));
+          assert.deepEqual(target?.score, { numerator: '7', denominator: '3' });
           assert.equal(first.policyInput.reviews.find((review) =>
             review.documentDigest === revoked.document.documentHash)?.publication.revocation, 'revoked');
           assert.ok(target?.warnings.includes('prior-history-excluded'));
           assert.equal(JSON.stringify(first).includes(lowPath), false);
           assert.equal(JSON.stringify(first).includes(low.bundle.bytes.toString()), false);
+          const missingCurrent = await freshConsumer({ ...raw, privateBundleFiles: raw.privateBundleFiles.map((file) =>
+            file.documentHash === current.document.documentHash ? { ...file, path: null } : file) });
+          const unavailableCurrent = missingCurrent.policyInput?.reviews.find((review) => review.documentDigest === current.document.documentHash);
+          assert.equal(unavailableCurrent?.checks.links, 'unknown');
+          assert.equal(unavailableCurrent?.historyQualification, 'unknown');
+          assert.equal(missingCurrent.policyResult?.selection.rated.length, 1);
+          // Same signed envelopes, different exact outer bytes: hashing only
+          // statement digests or rebuilding the bundle would incorrectly pass.
+          const substituted = encodeSupportingBundle({ request: current.interaction.request,
+            acceptance: current.interaction.acceptance, completion: current.interaction.completion,
+            cardBase64: Buffer.from(chicago[2]!.cardBytes).toString('base64'), version: '0.1' });
+          await withPrivateBundleFile(substituted.bytes, async (path) => {
+            const mismatch = await freshConsumer({ ...raw, privateBundleFiles: raw.privateBundleFiles.map((file) =>
+              file.documentHash === current.document.documentHash ? { ...file, path } : file) });
+            const changed = mismatch.policyInput?.reviews.find((review) => review.documentDigest === current.document.documentHash);
+            assert.equal(changed?.epoch, 'unknown');
+            assert.equal(changed?.checks.links, 'unknown');
+            assert.equal(changed?.historyQualification, 'unknown');
+            assert.equal(mismatch.policyResult?.selection.rated.length, 1);
+            assert.equal(mismatch.policyResult?.selection.newcomers.length, 0);
+            assert.equal(mismatch.policyResult?.selection.unresolved.length, 2);
+          });
+          // A well-formed substitute can also contradict original authority.
+          // Neither its wrong card nor its forged basis invalidates the retained
+          // public negative whose commitment identifies different private bytes.
+          for (const [selected, baseline] of [[current, currentReview], [low, lowReview]] as const) {
+            assert.ok(baseline);
+            for (const substitution of ['wrong-card', 'wrong-basis'] as const) {
+              const request = selected.interaction.requestValue;
+              const substitute = commitSupportingBundle(encodeSupportingBundle({ version: '0.1',
+                request: substitution === 'wrong-basis' ? { ...selected.interaction.request,
+                  payloadBase64: Buffer.from(JSON.stringify({ ...request,
+                    profileBasis: { ...request.profileBasis, blockHash: `0x${'01'.repeat(32)}` } })).toString('base64') }
+                  : selected.interaction.request,
+                acceptance: selected.interaction.acceptance, completion: selected.interaction.completion,
+                cardBase64: Buffer.from(substitution === 'wrong-card' ? chicago[1]!.cardBytes
+                  : selected.originalProfile.cardBytes).toString('base64') }).bytes);
+              assert.notEqual(substitute.digest, selected.bundle.digest);
+              await withPrivateBundleFile(substitute.bytes, async (path) => {
+                const substitutedInput = { ...raw, privateBundleFiles: raw.privateBundleFiles.map((file) =>
+                  file.documentHash === selected.document.documentHash ? { ...file, path } : file) };
+                const firstSubstitution = await freshConsumer(substitutedInput);
+                const secondSubstitution = await freshConsumer(substitutedInput);
+                const context = `${baseline.epoch} epoch, ${substitution}`;
+                assert.deepEqual(secondSubstitution, firstSubstitution, context);
+                const reviews = firstSubstitution.policyInput?.reviews.filter((review) =>
+                  review.documentDigest === selected.document.documentHash);
+                assert.equal(reviews?.length, baseline.epoch === 'retired' ? 2 : 1, context);
+                for (const review of reviews ?? []) {
+                  assert.equal(review.rating, 1, context);
+                  assert.equal(review.checks.feedbackSignature, 'valid', context);
+                  assert.equal(review.publication.canonical, 'canonical', context);
+                  assert.equal(review.publication.projection, 'matched', context);
+                  assert.equal(review.publication.revocation, 'active', context);
+                  assert.equal(review.checks.originalAuthority, 'unknown', context);
+                  assert.equal(review.checks.requestSignature, 'unknown', context);
+                  assert.equal(review.checks.acceptanceSignature, 'unknown', context);
+                  assert.equal(review.checks.links, 'unknown', context);
+                  assert.equal(review.checks.result, 'unknown', context);
+                  assert.equal(review.checks.chronology, 'unknown', context);
+                  assert.equal(review.city, null, context);
+                  assert.equal(review.task, null, context);
+                  assert.equal(review.epoch, 'unknown', context);
+                  assert.equal(review.historyQualification, 'unknown', context);
+                }
+                const candidate = firstSubstitution.policyResult?.candidates.find((entry) => entry.service === baseline.service);
+                assert.equal(candidate?.view, 'recommended-unresolved', context);
+                assert.equal(candidate?.score, null, context);
+                assert.ok(candidate?.reviews.some((review) => review.reason === 'unknown-evidence'), context);
+                assert.equal(firstSubstitution.policyResult?.selection.rated.length, 1, context);
+                assert.equal(firstSubstitution.policyResult?.selection.newcomers.length, 0, context);
+                assert.equal(firstSubstitution.policyResult?.selection.unresolved.length, 2, context);
+              });
+            }
+          }
           const changedPolicy = await freshConsumer({ ...raw,
             policy: { ...raw.policy, reviewers: [], groups: [] } });
           assert.equal(changedPolicy.policyInput?.reviews.length, 0);
           assert.equal(changedPolicy.policyResult?.selection.newcomers.length, 3);
+              });
             });
           });
         });

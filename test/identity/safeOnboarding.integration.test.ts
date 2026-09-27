@@ -19,7 +19,10 @@ import type { OnboardingReport } from '../../src/safe/onboarding.js';
 const Safe = SafeExport as unknown as typeof SafeExport.default;
 const tokenAbi = parseAbi(['function ownerOf(uint256) view returns(address)', 'function tokenURI(uint256) view returns(string)']);
 
-test('one Safe resumes exact persisted actions across two city publications without fresh signatures', { timeout: 420_000 }, async (t) => {
+// All 25 fresh callers independently compile the pinned reference contracts.
+// Linux CI reached the final authority checks at 420s; keep those checks and
+// fresh-process isolation, with headroom only in this aggregate test deadline.
+test('one Safe resumes exact persisted actions across two city publications without fresh signatures', { timeout: 600_000 }, async (t) => {
   const onboarding = await import('../../src/safe/onboarding.js').catch(() => undefined);
   assert.ok(onboarding, 'bounded shared onboarding operations must exist');
   await withOwnedAnvil(async (rpcUrl) => {

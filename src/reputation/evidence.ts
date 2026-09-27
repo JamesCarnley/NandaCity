@@ -5,7 +5,8 @@ import { createPublicClient, hexToBytes, http, isAddress, keccak256, numberToHex
 import { z } from 'zod';
 
 import type { FeedbackIndexSource } from '../feedback/indexClient.js';
-import { readHistoricalFeedback, type HistoricalFeedbackObservation } from '../feedback/historicalRead.js';
+import { readFeedbackCarryForward, readHistoricalFeedback, type FeedbackCarryForwardObservation,
+  type HistoricalFeedbackObservation } from '../feedback/historicalRead.js';
 import type { ReputationDeploymentProvenance } from '../feedback/reputationActivation.js';
 import { decodeSupportingBundle, type SupportingBundle } from '../feedback/supportingBundle.js';
 import { continuityLimits, readIdentityFeedbackEpoch, type IdentityContinuityDomain } from '../identity/continuity.js';
@@ -64,6 +65,8 @@ export type RankingEvidenceSidecar = Readonly<{
       bundle: 'available' | 'absent' | 'rejected';
       historical: 'evaluated' | 'not-evaluated' | 'unavailable';
       epoch: 'same' | 'retired' | 'unknown'; policyReviewId: string | null;
+      bundleCommitment: FeedbackCarryForwardObservation['bundleCommitment'];
+      carryForward: FeedbackCarryForwardObservation['carryForward'] | null;
       source: Readonly<{ blockNumber: string; blockHash: Hex; transactionHash: Hex;
         transactionIndex: number; logIndex: number }> | null;
       sourceIndexes: readonly (0 | 1)[]; codes: readonly string[] }>[];
@@ -393,13 +396,18 @@ function match(values: readonly string[]): 'matched' | 'mismatched' | 'unknown' 
 
 function reviewFromObservation(state: ServiceState, slot: AcceptedReviewerCoverage['pairs'][number]['slots'][number],
   historical: HistoricalFeedbackObservation | null, bundle: SupportingBundle | null,
-  epoch: 'same' | 'retired' | 'unknown', observationDomain: string): PolicyReview {
+  epoch: 'same' | 'retired' | 'unknown', observationDomain: string,
+  bundleCommitment: FeedbackCarryForwardObservation['bundleCommitment']): PolicyReview {
   const observed = slot.observation;
   const source = observed.source!;
   const event = observed.event!;
   const document = historical?.publication.document.feedback;
-  const findings = historical?.historical.status === 'evaluated' ? historical.historical.findings : null;
-  const request = bundle?.request.statement.value;
+  // A substituted private bundle is not evidence that the public review itself
+  // is invalid. Ignore its private projections so it cannot erase negative history
+  // through a forged scope, invalid link or apparent newcomer classification.
+  const privateMatched = document?.version !== '0.2' || bundleCommitment === 'matched';
+  const findings = privateMatched && historical?.historical.status === 'evaluated' ? historical.historical.findings : null;
+  const request = privateMatched ? bundle?.request.statement.value : undefined;
   const result = findings?.resultEvidence === 'matched'
     ? findings.completionClaimedOutcome === 'completed' ? 'signed-completion' : 'signed-failure'
     : findings?.resultEvidence === 'post-deadline-reviewer-claim' ? 'post-deadline-reviewer-claim'
@@ -409,8 +417,8 @@ function reviewFromObservation(state: ServiceState, slot: AcceptedReviewerCovera
     : publication?.source && (publication.publication === 'matched' || publication.publication === 'mismatched') ? 'canonical' : 'unknown';
   const projection = publication?.publication === 'matched' ? 'matched'
     : publication?.publication === 'mismatched' ? 'mismatched' : 'unknown';
-  const original = match([historical?.originalAuthority.status ?? 'unknown', findings?.originalProfileBasis ?? 'unknown',
-    findings?.acceptanceSignerBinding ?? 'unknown']);
+  const original = privateMatched ? match([historical?.originalAuthority.status ?? 'unknown',
+    findings?.originalProfileBasis ?? 'unknown', findings?.acceptanceSignerBinding ?? 'unknown']) : 'unknown';
   const links = findings ? match([findings.reviewerBinding, findings.requestCallerBinding, findings.serviceLink,
     findings.registryDomain, findings.requestLink, findings.acceptanceLink,
     findings.completionLink === 'not-present' ? 'matched' : findings.completionLink,
@@ -426,7 +434,8 @@ function reviewFromObservation(state: ServiceState, slot: AcceptedReviewerCovera
     rubric: document?.rubric ?? null,
     rating: document?.value ?? null,
     checks: {
-      feedbackSignature: crypto(findings?.feedbackSignature ?? 'unknown'),
+      feedbackSignature: crypto(findings?.feedbackSignature ??
+        (document?.version === '0.2' ? publication?.document.signature ?? 'unknown' : 'unknown')),
       requestSignature: crypto(findings?.requestSignature ?? 'unknown'),
       acceptanceSignature: crypto(findings?.acceptanceSignature ?? 'unknown'),
       links, originalAuthority: original,
@@ -435,7 +444,7 @@ function reviewFromObservation(state: ServiceState, slot: AcceptedReviewerCovera
           publication?.claimedFeedbackTime === 'not-after-publication' ? 'consistent' : 'unknown',
       result,
     },
-    epoch, provenance: 'adapter-observed',
+    epoch: privateMatched ? epoch : 'unknown', provenance: 'adapter-observed',
     publication: { domain: observationDomain, block: source.blockNumber,
       transaction: source.transactionIndex, log: source.logIndex,
       timestamp: Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : 0,
@@ -498,9 +507,18 @@ async function readReviews(config: Config, work: RankingReadBudget, coverage: Ac
   const documents = new Map(coverage.documents.map((document) => [document.hash, document]));
   const files = new Map(config.privateBundleFiles.map((file) => [file.documentHash, file.path]));
   const privateBytes = new Map<string, Uint8Array>();
-  const epochs = new Map<string, Awaited<ReturnType<typeof readIdentityFeedbackEpoch>>>();
+  // The earliest independently matched canonical document anchor owns the history
+  // qualification. Later duplicates cannot refresh it (or its age/revocation).
+  const anchors = new Map<string, FeedbackCarryForwardObservation>();
+  const observations = new Map<string, FeedbackCarryForwardObservation>();
   const stateByAgent = new Map(states.map((state) => [state.agent.agentId, state]));
-  for (const pair of coverage.pairs) for (const slot of pair.slots) {
+  const ordered = coverage.pairs.flatMap((pair) => pair.slots.map((slot) => ({ pair, slot }))).sort((a, b) => {
+    const left = a.slot.observation.source, right = b.slot.observation.source;
+    if (!left || !right) return left ? -1 : right ? 1 : 0;
+    return (BigInt(left.blockNumber) < BigInt(right.blockNumber) ? -1 : BigInt(left.blockNumber) > BigInt(right.blockNumber) ? 1 : 0) ||
+      left.transactionIndex - right.transactionIndex || left.logIndex - right.logIndex;
+  });
+  for (const { pair, slot } of ordered) {
     const state = stateByAgent.get(pair.agentId);
     if (!state || !slot.observation.event || !slot.observation.source) continue;
     const event = slot.observation.event, source = slot.observation.source;
@@ -512,12 +530,14 @@ async function readReviews(config: Config, work: RankingReadBudget, coverage: Ac
     let epoch: SlotSidecar['epoch'] = 'unknown';
     let policyReviewId: string | null = null;
     let historical: HistoricalFeedbackObservation | null = null;
+    let composed: FeedbackCarryForwardObservation | null = null;
     let bundle: SupportingBundle | null = null;
     let bytes: Uint8Array | null = null;
     const preserveSlot = (): void => {
       sidecars.get(state.service)!.push({ reviewer: pair.reviewer,
         feedbackIndex: event.feedbackIndex, documentHash: event.feedbackHash as Hex,
         document: documentState, bundle: bundleState, historical: historicalState, epoch,
+        bundleCommitment: composed?.bundleCommitment ?? 'unavailable', carryForward: composed?.carryForward ?? null,
         policyReviewId, source: { blockNumber: source.blockNumber, blockHash: source.blockHash,
           transactionHash: source.transactionHash, transactionIndex: source.transactionIndex, logIndex: source.logIndex },
         sourceIndexes: [...new Set(slot.sources.map((index) => coverage.rows[index]?.origin)
@@ -537,13 +557,24 @@ async function readReviews(config: Config, work: RankingReadBudget, coverage: Ac
       }
     } catch { bytes = null; bundleState = 'rejected'; codes.push('private-bundle-rejected'); }
     try {
-      historical = await readHistoricalFeedback({ client: guardedClient(createClient(config, work), config.observation),
+      const readInput = { client: guardedClient(createClient(config, work), config.observation),
         domain: config.provenance.domain,
         eventRef: { blockNumber: source.blockNumber, blockHash: source.blockHash,
           transactionHash: source.transactionHash, transactionIndex: source.transactionIndex,
           logIndex: source.logIndex, feedbackURI: rawText(event.feedbackURIBytes, 2_048) },
         observationBlock: config.observation.blockNumber,
-        documentBytes: document?.bytes ?? null, bundleBytes: bytes });
+        documentBytes: document?.bytes ?? null, bundleBytes: bytes };
+      composed = anchors.get(event.feedbackHash) ?? null;
+      if (composed) historical = await readHistoricalFeedback(readInput);
+      else {
+        composed = await readFeedbackCarryForward({ ...readInput, identityDomain: config.identityDomain,
+          limits: continuityLimits, ...(config.signal ? { signal: config.signal } : {}) });
+        historical = composed.historical;
+        if (historical.publication.publication === 'matched') anchors.set(event.feedbackHash, composed);
+      }
+      observations.set(event.feedbackHash, composed);
+      epoch = composed.epoch?.epoch ?? 'unknown';
+      codes.push(...composed.carryForward.reasons, ...(composed.epoch?.diagnostics.map(diagnosticCode) ?? []));
       historicalState = historical.historical.status;
       if (historical.historical.status === 'not-evaluated' && historical.historical.reason === 'document-malformed') {
         documentState = 'incompatible';
@@ -552,25 +583,8 @@ async function readReviews(config: Config, work: RankingReadBudget, coverage: Ac
         ...historical.originalAuthority.diagnostics.map(diagnosticCode),
         ...historical.publication.diagnostics.map(diagnosticCode));
     } catch { historicalState = 'unavailable'; codes.push('historical-read-unavailable'); }
-    if (historical?.historical.status === 'evaluated' && bundle?.request.statement.value.kind === 'request') {
-      const basis = bundle.request.statement.value.profileBasis;
-      const epochKey = JSON.stringify([state.service, basis.blockNumber, basis.blockHash,
-        config.observation.blockNumber.toString(), config.observation.blockHash]);
-      try {
-        let finding = epochs.get(epochKey);
-        if (!finding) {
-          finding = await readIdentityFeedbackEpoch(guardedClient(createClient(config, work), config.observation), {
-            domain: config.identityDomain, agent: state.agent,
-            basis: { blockNumber: BigInt(basis.blockNumber), blockHash: basis.blockHash as Hex },
-            observation: config.observation, limits: continuityLimits,
-            ...(config.signal ? { signal: config.signal } : {}) });
-          if (finding.epoch !== 'unknown') epochs.set(epochKey, finding);
-        }
-        epoch = finding.epoch;
-        codes.push(...finding.diagnostics.map(diagnosticCode));
-      } catch { codes.push('identity-epoch-unavailable'); }
-    }
-    const review = reviewFromObservation(state, slot, historical, bundle, epoch, observationDomain);
+    const review = reviewFromObservation(state, slot, historical, bundle, epoch, observationDomain,
+      composed?.bundleCommitment ?? 'unavailable');
     try {
       // Use the calculator's public validation as the last representability fence.
       calculatePolicy({ policy: config.policy, scope: config.scope,
@@ -582,6 +596,20 @@ async function readReviews(config: Config, work: RankingReadBudget, coverage: Ac
     } catch { codes.push('policy-review-unrepresentable'); qualificationGaps.add(state.service); }
     preserveSlot();
   }
+  for (const review of reviews) {
+    const finding = anchors.get(review.documentDigest) ?? observations.get(review.documentDigest);
+    const privateMatched = finding?.bundleCommitment === 'matched' || finding?.bundleCommitment === 'uncommitted';
+    review.historyQualification = !privateMatched ? 'unknown'
+      : finding?.carryForward.status === 'qualified' ? 'committed-before-runtime-retirement'
+      : finding?.carryForward.status === 'unknown' ? 'unknown' : 'unqualified';
+    if (finding?.carryForward.basis) review.historyBasis = { version: '0.1', ...finding.carryForward.basis };
+    if (finding?.epoch && privateMatched) review.epoch = finding.epoch.epoch;
+  }
+  for (const [service, slots] of sidecars) sidecars.set(service, slots.map((slot) => {
+    const finding = anchors.get(slot.documentHash) ?? observations.get(slot.documentHash);
+    return finding ? { ...slot, epoch: finding.epoch?.epoch ?? 'unknown',
+      bundleCommitment: finding.bundleCommitment, carryForward: finding.carryForward } : slot;
+  }));
   return { reviews: reconcilePolicyReviews(reviews, sidecars, qualificationGaps),
     slots: sidecars, qualificationGaps };
 }

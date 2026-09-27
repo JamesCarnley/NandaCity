@@ -1,3 +1,4 @@
+import { keccak256, type Hex } from 'viem';
 import { MAX_CARD_BYTES } from '../identity/profile.js';
 import type { DecodedStatement } from '../interaction/bytes.js';
 import type { CityAcceptance, CityCompletion, CityRequest, CityStatement, SignedEnvelope } from '../interaction/schema.js';
@@ -139,4 +140,10 @@ export function encodeSupportingBundle(value: unknown): SupportingBundle {
   checkValue(value);
   validate(value); // Unknown undefined fields must not vanish in JSON.stringify.
   return decodeSupportingBundle(encoder.encode(JSON.stringify(value)));
+}
+
+/** Validate and copy the original bytes before committing them; never re-encode. */
+export function commitSupportingBundle(bytes: Uint8Array): SupportingBundle & { digest: Hex } {
+  const bundle = decodeSupportingBundle(bytes);
+  return { ...bundle, digest: keccak256(bundle.bytes) };
 }

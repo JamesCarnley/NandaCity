@@ -63,6 +63,32 @@ function reason(input: PolicyInput, id: string) {
   return result(input).reviews.find((r) => r.id === id)?.reason;
 }
 
+test('only explicit committed runtime history bypasses retirement without changing age or revocation', () => {
+  const input = fixture();
+  const first = review(1, { epoch: 'retired', rating: 1,
+    historyQualification: 'committed-before-runtime-retirement',
+    historyBasis: { version: '0.1', documentDigest: digest(1), bundleDigest: digest(90),
+      original: { blockNumber: '5', blockHash: digest(5) }, publication: { blockNumber: '11', blockHash: digest(11) },
+      retirement: { blockNumber: '12', blockHash: digest(12) }, observation: { blockNumber: '1000', blockHash: digest(1000) } } });
+  input.reviews = [first];
+  assert.deepEqual(result(input).score, { numerator: '7', denominator: '3' });
+  assert.equal(result(input).reviews[0]?.epoch, 'retired');
+  assert.equal(result(input).reviews[0]?.historyQualification, 'committed-before-runtime-retirement');
+  const duplicate = structuredClone(first); duplicate.id = 'duplicate';
+  duplicate.publication = { ...first.publication, block: '20', timestamp: NOW };
+  first.publication.timestamp = NOW - 91 * DAY; input.reviews.push(duplicate);
+  assert.equal(reason(input, first.id), 'aged-out');
+  assert.equal(reason(input, duplicate.id), 'duplicate-publication');
+  assert.equal(result(input).score, null);
+  first.publication.revocation = 'revoked';
+  assert.equal(reason(input, first.id), 'revoked');
+  assert.notEqual(result(input).view, 'recommended-newcomer');
+  input.reviews = [review(1, { epoch: 'retired' })];
+  assert.equal(reason(input, 'review-1'), 'retired-authority');
+  input.reviews[0]!.historyQualification = 'unknown';
+  assert.equal(reason(input, 'review-1'), 'unknown-evidence');
+});
+
 test('one, two, and three groups use exact literal fractions, not rounded stars', () => {
   for (const [reviews, score] of [
     [[review(1)], { numerator: '11', denominator: '3' }],

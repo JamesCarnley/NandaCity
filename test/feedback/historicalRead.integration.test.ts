@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createPublicClient, encodeFunctionData, http, parseAbi, type Hex, type PublicClient } from 'viem';
+import { createPublicClient, encodeFunctionData, http, keccak256, parseAbi, type Hex, type PublicClient } from 'viem';
+import { IMPLEMENTATION_SLOT } from '../../src/identity/continuity.js';
 import { withOwnedAnvil } from '../../src/demo/anvil.js';
 import { prepareLocalFeedbackPublication, prepareLocalFeedbackRevocation, submitPreparedFeedback } from '../../src/demo/feedbackPublication.js';
 import { published as publishProfile, receipt, registryAbi } from '../../src/demo/registryFixture.js';
@@ -11,7 +12,7 @@ import { encodeFeedbackDocument } from '../../src/feedback/document.js';
 import { readFeedbackPublication } from '../../src/feedback/publication.js';
 import { reputationRegistryAbi } from '../../src/feedback/registry.js';
 import { signFeedback } from '../../src/feedback/signatures.js';
-import { encodeSupportingBundle } from '../../src/feedback/supportingBundle.js';
+import { commitSupportingBundle, encodeSupportingBundle } from '../../src/feedback/supportingBundle.js';
 import { publicationFixture } from './fixtures.js';
 
 const otherHash = `0x${'12'.repeat(32)}` as Hex;
@@ -23,6 +24,213 @@ type RpcMessage = { method: string; params: unknown[] };
 type RpcReply = { result?: any; error?: unknown; id: number; jsonrpc: string };
 const selector = (message: RpcMessage) => message.method === 'eth_call'
   ? (message.params[0] as { data: string }).data.slice(0, 10) : '';
+
+test('committed history requires exact bytes before retirement and whole-interval ownership', { timeout: 90_000 }, async (t) => {
+  const module = await import('../../src/feedback/historicalRead.js');
+  assert.equal(typeof module.readFeedbackCarryForward, 'function');
+  await withOwnedAnvil(async (rpcUrl) => {
+    const f = await publicationFixture(rpcUrl);
+    const slot = await f.publicClient.getStorageAt({ address: f.identityRegistry, slot: IMPLEMENTATION_SLOT });
+    const implementation = `0x${slot!.slice(-40)}` as Hex;
+    const genesis = await f.publicClient.getBlock({ blockNumber: 0n });
+    const domain = { chainId: 31337, identityRegistry: f.identityRegistry,
+      reputationRegistry: f.reputationRegistry, genesisHash: genesis.hash! };
+    const identityDomain = { chainId: 31337, registry: f.identityRegistry, genesisHash: genesis.hash!,
+      knownImplementation: { address: implementation, codeHash: keccak256((await f.publicClient.getCode({ address: implementation }))!) } };
+    const rawBundle = { version: '0.1', request: f.request, acceptance: f.acceptance, completion: f.completion,
+      cardBase64: Buffer.from(f.originalProfile.cardBytes).toString('base64') };
+    const bundle = commitSupportingBundle(encodeSupportingBundle(rawBundle).bytes);
+    const document = encodeFeedbackDocument(await signFeedback({ ...f.feedbackValue,
+      version: '0.2', supportingBundleDigest: bundle.digest }, f.caller));
+    const publicationInput = { ...f.input, document: document.bytes };
+    const prepared = await prepareLocalFeedbackPublication(publicationInput);
+    await f.testClient.setNextBlockTimestamp({ timestamp: BigInt(Date.parse(f.at(100)) / 1000) });
+    const published = await submitPreparedFeedback({ ...publicationInput, prepared });
+    const { completion: _completion, ...withoutCompletion } = rawBundle;
+    const noCompletionBundle = commitSupportingBundle(encodeSupportingBundle(withoutCompletion).bytes);
+    const publishVariant = async (noResult: boolean) => {
+      const document = encodeFeedbackDocument(await signFeedback({ ...f.feedbackValue, version: '0.2',
+        supportingBundleDigest: noCompletionBundle.digest, ...(noResult ? { createdAt: f.at(70),
+          result: { kind: 'no-result-observed' as const, observedAt: f.at(65) } } : {}) }, f.caller));
+      const variantInput = { ...f.input, document: document.bytes };
+      const prepared = await prepareLocalFeedbackPublication(variantInput);
+      const publication = await submitPreparedFeedback({ ...variantInput, prepared });
+      return { documentBytes: document.bytes, bundleBytes: noCompletionBundle.bytes,
+        eventRef: { ...publication.event, feedbackURI: f.feedbackURI } };
+    };
+    const noResult = await publishVariant(true);
+    const missingCompletion = await publishVariant(false);
+    const invalidCompletionBundle = commitSupportingBundle(encodeSupportingBundle({ ...rawBundle,
+      completion: { ...f.completion, signature: `0x${'11'.repeat(65)}` } }).bytes);
+    const invalidCompletionDocument = encodeFeedbackDocument(await signFeedback({ ...f.feedbackValue, version: '0.2',
+      supportingBundleDigest: invalidCompletionBundle.digest, createdAt: f.at(70),
+      result: { kind: 'no-result-observed', observedAt: f.at(65) } }, f.caller));
+    // The registry accepts opaque hashes, independently of City's local writer checks.
+    const invalidPublication = await receipt(f.publicClient, await f.walletClient.writeContract({ address: f.reputationRegistry,
+      abi: reputationRegistryAbi, functionName: 'giveFeedback', args: [0n, 5n, 0,
+        'evening-plan-usefulness-v0.1', '', '', f.feedbackURI, invalidCompletionDocument.documentHash], chain: null }));
+    const invalidLog = invalidPublication.logs.find((log) => log.address.toLowerCase() === f.reputationRegistry.toLowerCase())!;
+    const input = { client: f.publicClient, domain, identityDomain, limits: { maxBlocks: 128, maxLogs: 64 },
+      eventRef: { ...published.event, feedbackURI: f.feedbackURI }, documentBytes: document.bytes,
+      bundleBytes: bundle.bytes, observationBlock: BigInt(published.event.blockNumber) };
+    const rotate = async (signer = f.stranger.address, active = true) => {
+      const record = publishProfile({ agentId: '0', owner: f.owner, city: 'Chicago',
+        cardUrl: 'http://127.0.0.1:39003/card', invocationUrl: 'http://127.0.0.1:39003/a2a',
+        revision: 2, cardBytes: new Uint8Array(), agentURI: '' }, 31337, f.identityRegistry, active, signer);
+      return receipt(f.publicClient, await f.ownerWallet.writeContract({ address: f.identityRegistry,
+        abi: registryAbi, functionName: 'setAgentURI', args: [0n, record.agentURI], chain: null }));
+    };
+    await t.test('same-block publication is insufficient even with earlier transaction order', async () => {
+      const snapshot = await f.testClient.snapshot();
+      try {
+        const repeat = await prepareLocalFeedbackPublication(publicationInput);
+        const record = publishProfile({ agentId: '0', owner: f.owner, city: 'Chicago',
+          cardUrl: 'http://127.0.0.1:39003/card', invocationUrl: 'http://127.0.0.1:39003/a2a',
+          revision: 2, cardBytes: new Uint8Array(), agentURI: '' }, 31337, f.identityRegistry, true, f.stranger.address);
+        await f.testClient.setAutomine(false);
+        await f.walletClient.sendRawTransaction({ serializedTransaction: repeat.rawTransaction });
+        const change = await f.ownerWallet.writeContract({ address: f.identityRegistry, abi: registryAbi,
+          functionName: 'setAgentURI', args: [0n, record.agentURI], chain: null });
+        await f.testClient.mine({ blocks: 1 });
+        const retirement = await receipt(f.publicClient, change);
+        const publication = await submitPreparedFeedback({ ...publicationInput, prepared: repeat });
+        assert.equal(publication.event.blockNumber, retirement.blockNumber.toString());
+        const finding = await module.readFeedbackCarryForward({ ...input, observationBlock: retirement.blockNumber,
+          eventRef: { ...publication.event, feedbackURI: f.feedbackURI } });
+        assert.equal(finding.carryForward.status, 'ineligible');
+        assert.ok(finding.carryForward.reasons.includes('publication-not-before-retirement'));
+      } finally { await f.testClient.setAutomine(true); await f.testClient.revert({ id: snapshot }); }
+    });
+    await t.test('endpoint-only migration retains same epoch and requires a matching commitment', async () => {
+      const snapshot = await f.testClient.snapshot();
+      try {
+        const request = decodeEnvelope(f.request).statement.value as CityRequest;
+        const endpoint = await rotate(request.profileBasis.receiptSigner as Hex);
+        const finding = await module.readFeedbackCarryForward({ ...input, observationBlock: endpoint.blockNumber });
+        assert.equal(finding.epoch?.epoch, 'same');
+        assert.equal(finding.bundleCommitment, 'matched');
+        assert.deepEqual(finding.carryForward.reasons, ['runtime-not-retired']);
+        const missing = await module.readFeedbackCarryForward({ ...input, observationBlock: endpoint.blockNumber, bundleBytes: null });
+        assert.equal(missing.bundleCommitment, 'unavailable');
+        assert.equal(missing.carryForward.status, 'unknown');
+      } finally { await f.testClient.revert({ id: snapshot }); }
+    });
+    const retirement = await rotate();
+    const observationBlock = retirement.blockNumber;
+    const result = await module.readFeedbackCarryForward({ ...input, observationBlock });
+    assert.equal(result.carryForward.status, 'qualified', JSON.stringify({ carryForward: result.carryForward,
+      epoch: result.epoch, original: result.historical.originalAuthority, publication: result.historical.publication.diagnostics,
+      historical: result.historical.historical }));
+    assert.equal(result.bundleCommitment, 'matched');
+    assert.equal(result.epoch?.epoch, 'retired');
+    assert.equal(result.carryForward.basis?.retirement.blockHash, retirement.blockHash);
+    assert.equal(result.historical.historical.status, 'evaluated');
+    if (result.historical.historical.status === 'evaluated') {
+      assert.equal(result.historical.historical.findings.historicalExistence, 'unknown');
+      assert.equal(result.historical.historical.findings.historicalOrdering, 'unknown');
+    }
+    assert.equal(result.historical.publication.historicalExistence, 'unknown');
+    assert.ok(!JSON.stringify(result).includes(rawBundle.cardBase64));
+    assert.ok(!JSON.stringify(result).includes(f.request.payloadBase64));
+    await t.test('committed no-result needs no invented completion; referenced completion remains mandatory', async () => {
+      const claim = await module.readFeedbackCarryForward({ ...input, observationBlock, ...noResult });
+      assert.equal(claim.carryForward.status, 'qualified');
+      if (claim.historical.historical.status !== 'evaluated') assert.fail();
+      assert.equal(claim.historical.historical.findings.resultEvidence, 'post-deadline-reviewer-claim');
+      const absent = await module.readFeedbackCarryForward({ ...input, observationBlock, ...missingCompletion });
+      assert.equal(absent.bundleCommitment, 'matched');
+      assert.equal(absent.carryForward.status, 'unknown');
+      if (absent.historical.historical.status !== 'evaluated') assert.fail();
+      assert.equal(absent.historical.historical.findings.resultEvidence, 'unavailable');
+    });
+    await t.test('every included signature must be valid even when no-result does not cite completion', async () => {
+      const finding = await module.readFeedbackCarryForward({ ...input, observationBlock,
+        documentBytes: invalidCompletionDocument.bytes, bundleBytes: invalidCompletionBundle.bytes,
+        eventRef: { blockNumber: invalidPublication.blockNumber.toString(), blockHash: invalidPublication.blockHash,
+          transactionHash: invalidPublication.transactionHash, transactionIndex: invalidPublication.transactionIndex,
+          logIndex: invalidLog.logIndex!, feedbackURI: f.feedbackURI } });
+      assert.equal(finding.bundleCommitment, 'matched');
+      assert.equal(finding.historical.publication.publication, 'matched');
+      assert.equal(finding.carryForward.status, 'unknown');
+      assert.ok(finding.carryForward.reasons.includes('historical-evidence-unqualified'));
+    });
+    await t.test('revocation is separate from an already established byte commitment', async () => {
+      const snapshot = await f.testClient.snapshot();
+      try {
+        const revocation = await prepareLocalFeedbackRevocation({ ...f.input,
+          originalPublication: prepared, publicationResult: published });
+        const revoked = await submitPreparedFeedback({ ...f.input, prepared: revocation });
+        const finding = await module.readFeedbackCarryForward({ ...input, observationBlock: BigInt(revoked.receipt.blockNumber) });
+        assert.equal(finding.carryForward.status, 'qualified');
+        assert.equal(finding.historical.publication.revocation, 'revoked');
+      } finally { await f.testClient.revert({ id: snapshot }); }
+    });
+    await t.test('deauthorization and partial history cannot qualify retired runtime history', async () => {
+      const partial = await module.readFeedbackCarryForward({ ...input, observationBlock, limits: { maxBlocks: 1, maxLogs: 1 } });
+      assert.equal(partial.carryForward.status, 'unknown');
+      assert.equal(partial.epoch?.ownerEpoch, 'unknown');
+      const snapshot = await f.testClient.snapshot();
+      try {
+        await rotate(f.stranger.address, false);
+        const back = await rotate();
+        const finding = await module.readFeedbackCarryForward({ ...input, observationBlock: back.blockNumber });
+        assert.equal(finding.epoch?.deauthorization, 'observed');
+        assert.equal(finding.carryForward.status, 'ineligible');
+      } finally { await f.testClient.revert({ id: snapshot }); }
+    });
+    await t.test('forged event coordinates, projection and domain cannot qualify', async () => {
+      for (const patch of [
+        { eventRef: { ...input.eventRef, transactionHash: otherHash } },
+        { eventRef: { ...input.eventRef, logIndex: input.eventRef.logIndex + 1 } },
+        { eventRef: { ...input.eventRef, feedbackURI: `${f.feedbackURI}&forged=1` } },
+        { identityDomain: { ...identityDomain, genesisHash: otherHash } },
+      ]) {
+        const finding = await module.readFeedbackCarryForward({ ...input, observationBlock, ...patch });
+        assert.notEqual(finding.carryForward.status, 'qualified');
+      }
+    });
+    await t.test('a final publication-basis reorg downgrades the composed finding', async () => {
+      let reads = 0;
+      const client = new Proxy(f.publicClient, { get(target, key) {
+        if (key === 'getBlock') return async (args: Parameters<PublicClient['getBlock']>[0]) => {
+          const block = await f.publicClient.getBlock(args);
+          if (args?.blockNumber === BigInt(published.event.blockNumber) && ++reads >= 3) return { ...block, hash: otherHash };
+          return block;
+        };
+        return Reflect.get(target, key);
+      } });
+      const finding = await module.readFeedbackCarryForward({ ...input, observationBlock, client });
+      assert.equal(finding.carryForward.status, 'unknown');
+      assert.ok(finding.carryForward.reasons.includes('basis-recheck-failed'));
+      assert.equal(finding.epoch?.epoch, 'unknown');
+    });
+    await t.test('absent or changed signature bytes cannot inherit qualification', async () => {
+      const changed = encodeSupportingBundle({ ...rawBundle,
+        acceptance: { ...f.acceptance, signature: `0x${'11'.repeat(65)}` } }).bytes;
+      for (const bundleBytes of [null, changed]) {
+        const finding = await module.readFeedbackCarryForward({ ...input, observationBlock, bundleBytes });
+        assert.notEqual(finding.carryForward.status, 'qualified');
+        assert.notEqual(finding.bundleCommitment, 'matched');
+      }
+    });
+    await t.test('publication after retirement is ineligible despite valid private signatures', async () => {
+      const nextPrepared = await prepareLocalFeedbackPublication(publicationInput);
+      const later = await submitPreparedFeedback({ ...publicationInput, prepared: nextPrepared });
+      const finding = await module.readFeedbackCarryForward({ ...input, observationBlock: BigInt(later.event.blockNumber),
+        eventRef: { ...later.event, feedbackURI: f.feedbackURI } });
+      assert.equal(finding.carryForward.status, 'ineligible');
+      assert.ok(finding.carryForward.reasons.includes('publication-not-before-retirement'));
+    });
+    await t.test('self-transfer after runtime retirement excludes carry-forward', async () => {
+      const transfer = await receipt(f.publicClient, await f.ownerWallet.writeContract({ address: f.identityRegistry,
+        abi: parseAbi(['function transferFrom(address,address,uint256)']), functionName: 'transferFrom',
+        args: [f.owner.address, f.owner.address, 0n], chain: null }));
+      const finding = await module.readFeedbackCarryForward({ ...input, observationBlock: transfer.blockNumber });
+      assert.equal(finding.epoch?.ownerEpoch, 'transferred');
+      assert.equal(finding.carryForward.status, 'ineligible');
+    });
+  }, { genesisMarker: { blockNumber: 0n, timestamp: 1_700_000_000n } });
+});
 
 /** All observations forward to real owned Anvil. Only selected RPC faults are altered. */
 function readClient(rpcUrl: string, originalBlock: bigint, observationBlock: bigint,

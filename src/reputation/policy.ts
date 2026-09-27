@@ -14,10 +14,14 @@ const checksSchema = z.strictObject({
   chronology: z.enum(['consistent', 'inconsistent', 'unknown']),
   result: z.enum(['signed-completion', 'signed-failure', 'post-deadline-reviewer-claim', 'invalid', 'unknown']),
 });
+const historyPoint = z.strictObject({ blockNumber: block, blockHash: digest });
 const reviewSchema = z.strictObject({
   id: key, documentDigest: digest, service: key, reviewer: key.nullable(), interaction: key.nullable(),
   city: key.nullable(), task: key.nullable(), rubric: key.nullable(), rating: z.number().int().min(1).max(5).nullable(),
   checks: checksSchema, epoch: z.enum(['same', 'retired', 'unknown']), provenance,
+  historyQualification: z.enum(['unqualified', 'committed-before-runtime-retirement', 'unknown']).optional(),
+  historyBasis: z.strictObject({ version: z.literal('0.1'), documentDigest: digest, bundleDigest: digest,
+    original: historyPoint, publication: historyPoint, retirement: historyPoint, observation: historyPoint }).optional(),
   publication: z.strictObject({
     domain: key, block, transaction: z.number().int().min(0).max(4294967295), log: z.number().int().min(0).max(4294967295),
     timestamp, canonical: z.enum(['canonical', 'noncanonical', 'unknown']), projection: match, revocation: z.enum(['active', 'revoked', 'unknown']),
@@ -69,6 +73,7 @@ type ReviewExplanation = {
   id: string; documentDigest: string; reviewer: string | null; interaction: string | null;
   reason: ReviewReason; anchor: string | null; provenance: Review['provenance'];
   rating: number | null; epoch: Review['epoch']; checks: Review['checks'];
+  historyQualification: NonNullable<Review['historyQualification']>; historyBasis?: Review['historyBasis'];
   resultKind: Review['checks']['result']; publication: Review['publication'];
 };
 type AdmissionExplanation = { id: string; kind: 'test' | 'curator'; issuer: string; provenance: Review['provenance']; reason: string };
@@ -82,7 +87,7 @@ export type CandidateResult = {
   warnings: string[]; historicalOrdering: 'unknown'; reviews: ReviewExplanation[]; admissions: AdmissionExplanation[];
 };
 export type PolicyResult = {
-  algorithm: { id: 'city-usefulness'; version: '0.1'; windowSeconds: number; interactionsPerReviewer: 3; priorWeight: 2; priorMean: 3 };
+  algorithm: { id: 'city-usefulness'; version: '0.2'; windowSeconds: number; interactionsPerReviewer: 3; priorWeight: 2; priorMean: 3 };
   qualification: 'input-findings-not-verified-by-calculator'; policy: PolicyInput['policy'];
   scope: PolicyInput['scope']; observation: PolicyInput['observation']; candidates: CandidateResult[];
   evidence: { id: string; service: string; reason: string }[];
@@ -170,6 +175,15 @@ function parse(input: unknown): PolicyInput {
   const documents = new Map<string, string>();
   const publications = new Map<string, string>();
   for (const review of parsed.reviews) {
+    review.historyQualification ??= 'unqualified';
+    if (review.historyQualification === 'committed-before-runtime-retirement') {
+      const basis = review.historyBasis;
+      if (!basis || basis.documentDigest !== review.documentDigest || review.epoch !== 'retired' ||
+          BigInt(basis.original.blockNumber) > BigInt(basis.publication.blockNumber) ||
+          BigInt(basis.publication.blockNumber) >= BigInt(basis.retirement.blockNumber) ||
+          BigInt(basis.retirement.blockNumber) > BigInt(basis.observation.blockNumber) ||
+          basis.observation.blockNumber !== parsed.observation.block) throw new Error('invalid history qualification basis');
+    }
     const descriptor = documentFinding(review);
     const previous = documents.get(review.documentDigest);
     if (previous !== undefined && previous !== descriptor) throw new Error('contradictory duplicate document findings');
@@ -220,6 +234,8 @@ function explain(review: Review): ReviewExplanation {
     id: review.id, documentDigest: review.documentDigest, reviewer: review.reviewer, interaction: review.interaction,
     reason: 'contributing', anchor: review.id, provenance: review.provenance,
     rating: review.rating, epoch: review.epoch, checks: review.checks,
+    historyQualification: review.historyQualification ?? 'unqualified',
+    ...(review.historyBasis ? { historyBasis: review.historyBasis } : {}),
     resultKind: review.checks.result, publication: review.publication,
   };
 }
@@ -268,7 +284,9 @@ function selectReviews(input: PolicyInput, candidate: Candidate, byId: Map<strin
     // An earlier unqualified publication could change both age and revision order.
     const uncertainAnchor = !canonical || first.publication.canonical !== 'canonical' || first.publication.projection !== 'matched';
     const anchor = uncertainAnchor ? first : canonical;
-    const unknown = uncertainAnchor || documentStatus(anchor) === 'unknown';
+    const unknown = uncertainAnchor || documentStatus(anchor) === 'unknown' || anchor.historyQualification === 'unknown' ||
+      (anchor.historyQualification === 'committed-before-runtime-retirement' &&
+        anchor.historyBasis?.publication.blockNumber !== anchor.publication.block);
     for (const publication of publications) {
       const explanation = byId.get(publication.id)!;
       explanation.anchor = uncertainAnchor ? null : anchor.id;
@@ -278,7 +296,7 @@ function selectReviews(input: PolicyInput, candidate: Candidate, byId: Map<strin
     // of negative evidence. Known later duplicates of a known first anchor do not
     // affect its age, current revocation finding, or qualification.
     if (unknown) unresolved = true;
-    if (!unknown && anchor.epoch === 'retired') priorExcluded = true;
+    if (!unknown && anchor.epoch === 'retired' && anchor.historyQualification !== 'committed-before-runtime-retirement') priorExcluded = true;
     anchors.push({ review: anchor, unknown });
   }
   const eligible: Review[] = [];
@@ -297,7 +315,7 @@ function selectReviews(input: PolicyInput, candidate: Candidate, byId: Map<strin
     if (possiblyLater) { byId.get(review.id)!.reason = 'unresolved-revision'; continue; }
     let exclusion: ReviewReason | null = null;
     if (review.publication.revocation === 'revoked') exclusion = 'revoked';
-    else if (review.epoch === 'retired') exclusion = 'retired-authority';
+    else if (review.epoch === 'retired' && review.historyQualification !== 'committed-before-runtime-retirement') exclusion = 'retired-authority';
     else if (input.observation.timestamp - review.publication.timestamp > WINDOW_SECONDS) exclusion = 'aged-out';
     else if (review.publication.revocation === 'unknown' || review.epoch === 'unknown') { exclusion = 'unknown-evidence'; unresolved = true; }
     if (exclusion) {
@@ -384,7 +402,7 @@ export function calculatePolicy(input: unknown): PolicyResult {
       .find((explanation) => explanation.id === entry.id)?.reason ?? 'service-not-in-candidates',
   })).sort((a, b) => compare(a.id, b.id));
   return {
-    algorithm: { id: 'city-usefulness', version: '0.1', windowSeconds: WINDOW_SECONDS, interactionsPerReviewer: 3, priorWeight: 2, priorMean: 3 },
+    algorithm: { id: 'city-usefulness', version: '0.2', windowSeconds: WINDOW_SECONDS, interactionsPerReviewer: 3, priorWeight: 2, priorMean: 3 },
     qualification: 'input-findings-not-verified-by-calculator', policy: parsed.policy,
     scope: parsed.scope, observation: parsed.observation, candidates, evidence, selection,
   };

@@ -17,6 +17,11 @@ export type IdentityContinuity = {
 };
 export type IdentityFeedbackEpoch = {
   epoch: 'same' | 'retired' | 'unknown';
+  ownerEpoch: 'uninterrupted' | 'transferred' | 'unknown';
+  deauthorization: 'absent' | 'observed' | 'unknown';
+  firstRuntimeRetirement?: { blockNumber: string; blockHash: Hex; transactionIndex: number; logIndex: number };
+  /** Canonical event bases for a composing reader's final bracket. */
+  eventBases?: { blockNumber: string; blockHash: Hex }[];
   qualification: 'rpc-derived-not-state-proof';
   basis: { blockNumber: string; blockHash: Hex };
   observation: { blockNumber: string; blockHash: Hex };
@@ -278,10 +283,12 @@ export async function readIdentityFeedbackEpoch(client: PublicClient, input: {
   const basis = { blockNumber: String(input.basis?.blockNumber), blockHash: input.basis?.blockHash };
   const observation = { blockNumber: String(input.observation?.blockNumber), blockHash: input.observation?.blockHash };
   let firstBreak: IdentityFeedbackEpoch['firstBreak'];
+  let firstRuntimeRetirement: IdentityFeedbackEpoch['firstRuntimeRetirement'];
   const unknown = (diagnostic: string): IdentityFeedbackEpoch => ({
-    epoch: 'unknown', qualification: 'rpc-derived-not-state-proof',
+    epoch: 'unknown', ownerEpoch: 'unknown', deauthorization: 'unknown', qualification: 'rpc-derived-not-state-proof',
     basis: basis as IdentityFeedbackEpoch['basis'], observation: observation as IdentityFeedbackEpoch['observation'],
     diagnostics: [diagnostic], ...(firstBreak ? { firstBreak } : {}),
+    ...(firstRuntimeRetirement ? { firstRuntimeRetirement } : {}),
   });
   const { domain, agent, limits } = input;
   if (!domain || !agent || !input.basis || !input.observation ||
@@ -317,6 +324,8 @@ export async function readIdentityFeedbackEpoch(client: PublicClient, input: {
     let trackedOwner = original.agentOwner;
     let trackedURI = original.agentURI;
     let trackedRuntime = initial.receiptSigner;
+    let transferred = false;
+    let deauthorized = false;
     let intervalFailure: string | undefined = interval.failure ?? (interval.currentKnown ? undefined :
       'unsupported identity implementation at observation');
     const retire = (event: CheckedEvent, kind: NonNullable<IdentityFeedbackEpoch['firstBreak']>['kind']) => {
@@ -333,6 +342,7 @@ export async function readIdentityFeedbackEpoch(client: PublicClient, input: {
           throw new Error('contradictory transfer history');
         }
         retire(event, 'transfer');
+        transferred = true;
         trackedOwner = next as Address;
         continue;
       }
@@ -341,8 +351,12 @@ export async function readIdentityFeedbackEpoch(client: PublicClient, input: {
           typeof updatedBy !== 'string' || !isAddress(updatedBy)) throw new Error('contradictory URI history');
       const nextURI = decodeStrictRawString(event.data, 64 * 1024, 'URIUpdated');
       const next = declarationAuthority(nextURI, trackedOwner, copied.agent);
-      if (next.receiptSigner.toLowerCase() !== trackedRuntime.toLowerCase()) retire(event, 'runtime-replaced');
-      if (!next.active) retire(event, 'deauthorized');
+      if (next.receiptSigner.toLowerCase() !== trackedRuntime.toLowerCase()) {
+        retire(event, 'runtime-replaced');
+        firstRuntimeRetirement ??= { blockNumber: event.blockNumber.toString(), blockHash: event.blockHash,
+          transactionIndex: event.transactionIndex, logIndex: event.logIndex };
+      }
+      if (!next.active) { retire(event, 'deauthorized'); deauthorized = true; }
       trackedRuntime = next.receiptSigner;
       trackedURI = nextURI;
     }
@@ -359,6 +373,10 @@ export async function readIdentityFeedbackEpoch(client: PublicClient, input: {
     await recheckBlocks(client, allBlocks, bounded, 'feedback epoch read');
     if (intervalFailure) return unknown(intervalFailure);
     return { epoch: firstBreak ? 'retired' : 'same', qualification: 'rpc-derived-not-state-proof',
+      ownerEpoch: transferred ? 'transferred' : 'uninterrupted', deauthorization: deauthorized ? 'observed' : 'absent',
+      ...(firstRuntimeRetirement ? { firstRuntimeRetirement } : {}),
+      ...(interval.events.length ? { eventBases: [...new Map(interval.events.map((event) =>
+        [event.blockNumber, { blockNumber: event.blockNumber.toString(), blockHash: event.blockHash }])).values()] } : {}),
       basis: basis as IdentityFeedbackEpoch['basis'], observation: observation as IdentityFeedbackEpoch['observation'],
       diagnostics: [], ...(firstBreak ? { firstBreak } : {}) };
   } catch (error) {

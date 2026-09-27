@@ -17,7 +17,7 @@ const canonicalUint = z.string().refine(
 const utcSecond = z.string().refine(isUtcSecond, 'must be a real UTC date at whole-second precision');
 const chainId = z.number().int().safe().positive();
 
-export const feedbackSchema = z.strictObject({
+const legacyFeedbackSchema = z.strictObject({
   kind: z.literal('feedback'),
   version: z.literal('0.1'),
   service: z.strictObject({
@@ -46,3 +46,18 @@ export const feedbackSchema = z.strictObject({
 });
 
 export type CityFeedback = z.infer<typeof feedbackSchema>;
+
+// Keep the strict legacy branch and all its validation intact. No implicit upgrade
+// or downgrade: v0.2 adds an exact private-bundle byte commitment.
+export const feedbackSchema = z.union([
+  legacyFeedbackSchema,
+  z.strictObject({ ...legacyFeedbackSchema.shape, version: z.literal('0.2'), supportingBundleDigest: bytes32 })
+    .superRefine((value, context) => {
+      if (value.reviewer.chainId !== value.service.agent.chainId) {
+        context.addIssue({ code: 'custom', path: ['reviewer', 'chainId'], message: 'reviewer and service chain IDs must match' });
+      }
+      if (value.reputationRegistry.chainId !== value.service.agent.chainId) {
+        context.addIssue({ code: 'custom', path: ['reputationRegistry', 'chainId'], message: 'reputation registry and service chain IDs must match' });
+      }
+    }),
+]);

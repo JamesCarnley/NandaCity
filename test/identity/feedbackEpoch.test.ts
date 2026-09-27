@@ -43,6 +43,7 @@ test('feedback epoch rejects invalid copied coordinates before RPC I/O', async (
   assert.equal(reads, 0);
   assert.deepEqual(result, {
     epoch: 'unknown',
+    ownerEpoch: 'unknown', deauthorization: 'unknown',
     qualification: 'rpc-derived-not-state-proof',
     basis: { blockNumber: '1', blockHash: hash },
     observation: { blockNumber: '1', blockHash: hash },

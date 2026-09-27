@@ -275,10 +275,52 @@ that signatures existed before runtime-key retirement. `historicalExistence` and
 
 ## Deliberately separate findings
 
+### Committed runtime history (feedback v0.2)
+
+The strict legacy v0.1 payload and `NandaCityFeedback/0.1` EIP-712 domain
+remain supported unchanged. Feedback v0.2 requires a lowercase bytes32
+`supportingBundleDigest` and signs only under `NandaCityFeedback/0.2`.
+The envelope and private bundle remain version `0.1`; payload/document limits
+remain 4 KiB/6 KiB. Unknown versions reject. Old strict readers reject v0.2;
+never downgrade its payload or try both signature domains.
+
+Construct the private bundle first, then commit its exact validated bytes:
+
+```ts
+const committed = commitSupportingBundle(encodeSupportingBundle(bundleFields).bytes);
+const document = encodeFeedbackDocument(await signFeedback({
+  ...feedbackFields, version: '0.2', supportingBundleDigest: committed.digest,
+}, reviewerAccount));
+```
+
+The digest covers the complete request, acceptance, optional completion envelopes
+(including signature bytes) and exact card bytes. Neither feedback nor its
+document belongs in the bundle, so there is no commitment cycle. Retain
+`committed.bytes` privately; neither publication nor Index acquisition uploads it.
+
+`readFeedbackCarryForward` accepts the historical reader's raw inputs plus a
+configured `identityDomain`, bounded `limits` and optional `signal`. It returns
+the unchanged historical observation, an independently scanned epoch, a separate
+bundle-commitment finding and `carryForward: qualified | ineligible | unknown`.
+Qualification requires valid linked evidence at the signed request's original
+basis, matching exact v0.2 bundle bytes, exact canonical publication/projection,
+and `original <= publication < first runtime retirement <= observation`.
+Same-block transaction ordering is insufficient. The entire bounded interval
+must have uninterrupted ERC-721 ownership and no deauthorization; self-transfer,
+away/back transfer, and deauthorization/reactivation remain excluded. Endpoint-only
+changes remain epoch-neutral. Runtime away/back remains retired but can qualify.
+
+Numbered original, publication, observation, retirement and event block hashes
+are rechecked. Partial history, unsupported upgrades, malformed declarations,
+reorgs or exhausted reads cannot qualify. The result assumes complete RPC logs;
+it is not a state/finality proof, proof of service-use or compromise time, or a
+quality finding. Revocation is separate and still blocks scoring. Pure verifier
+and publication-reader historical existence/ordering remain `unknown`.
+
 Signature validity, request/acceptance linkage, original owner-published runtime
 authority, on-chain publication, revocation, historical ordering, document
 availability and semantic quality are distinct. In particular a feedback
-commitment **does not prove the acceptance signature existed earlier**, nor that
+legacy v0.1 statement-digest commitment **does not prove the acceptance signature existed earlier**, nor that
 the service was good or that a no-result claim was true. Signer-authored times
 are chronology claims. Original profile reads are RPC-derived, not state proofs;
 the pure verifier still reports historical existence/ordering as unknown and

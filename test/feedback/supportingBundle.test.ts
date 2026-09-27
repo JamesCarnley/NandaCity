@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { keccak256 } from 'viem';
 import { makeInteractionFixture } from '../interaction/fixtures.js';
 
 const bytes = (text: string) => new TextEncoder().encode(text);
@@ -15,6 +16,20 @@ const codec = async () => {
   assert.ok(module, 'private supporting-bundle codec must be implemented');
   return module;
 };
+
+test('commitment hashes validated exact bundle bytes including signatures and freezes caller bytes', async () => {
+  const module = await codec();
+  assert.equal(typeof module.commitSupportingBundle, 'function');
+  const input = bytes(JSON.stringify(value()));
+  const committed = module.commitSupportingBundle(input);
+  assert.equal(committed.digest, keccak256(input));
+  input.fill(0);
+  assert.equal(committed.digest, keccak256(committed.bytes));
+  const changed = value(); changed.request.signature = `0x${'22'.repeat(65)}`;
+  assert.notEqual(module.commitSupportingBundle(bytes(JSON.stringify(changed))).digest, committed.digest);
+  const missing = value(); delete (missing.request as Record<string, unknown>).signature;
+  assert.throws(() => module.commitSupportingBundle(bytes(JSON.stringify(missing))), { code: 'bundle-malformed' });
+});
 
 test('bundle preserves copied outer, statement, signature and opaque card bytes without requiring completion', async () => {
   const { decodeSupportingBundle: decode, encodeSupportingBundle: encode } = await codec();

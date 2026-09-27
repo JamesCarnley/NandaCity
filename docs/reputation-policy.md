@@ -5,7 +5,7 @@ calculator over explicit findings. It has no HTTP, chain, clock, filesystem,
 wallet, Index, or Town adapter. Its literal tests are arithmetic and policy
 vectors, **not evidence of cryptographic verification or deployed reputation**.
 
-The algorithm is `city-usefulness` version `0.1`. The caller separately names
+The algorithm is `city-usefulness` version `0.2`. The caller separately names
 and versions the reviewer/curator/evaluator configuration. Both are returned.
 Changing that configuration can change the result; no universal trust score,
 independent people, semantic quality, liveness, or invocation safety is implied.
@@ -14,7 +14,8 @@ independent people, semantic quality, liveness, or invocation safety is implied.
 
 `PolicyInput` is exported for TypeScript callers. `calculatePolicy` accepts
 `unknown`, validates and copies it, and throws on malformed or contradictory
-input. All fields are required. Unknown fields are rejected at every level.
+input. Fields are required except the additive history qualification/basis fields
+described below. Unknown fields are rejected at every level.
 Outputs contain references, bounded findings and score factors, not private
 requests, preferences, answers, or supporting bundles.
 
@@ -93,6 +94,18 @@ migration can preserve that epoch; retirement, transfer, including away-and-back
 transitions, cannot be inferred away by this calculator. Historical signature
 ordering remains `unknown`. Signed dates do not prove pre-retirement existence.
 
+`historyQualification` is `unqualified` (the default for legacy inputs),
+`committed-before-runtime-retirement`, or `unknown`. The committed value requires
+a version `0.1` `historyBasis` containing document/bundle digests and numbered
+original, publication, retirement and observation block hashes. Its publication
+must be the document's earliest canonical matching anchor, identical across
+duplicates. Unknown earlier anchors remain unresolved. This explicit qualification
+alone bypasses retired-runtime exclusion; `epoch` remains `retired`, never `same`.
+The raw adapter derives it from v0.2 private byte commitment, complete uninterrupted
+ownership and absent deauthorization. Transfers and deauthorization/reactivation
+do not qualify. v0.2 also requires matching private bundle bytes in the same epoch.
+The calculator checks consistency of supplied findings, not their chain authority.
+
 `history` must cover canonical publication **and revocation**, from the declared
 registry deployment/start block through the exact observation ID. A complete
 finding requires `start: registry-start-confirmed`; `unproven`, partial, unavailable
@@ -118,7 +131,7 @@ not retrieve only recent publications and call the resulting history complete.
    by its first-anchor block, transaction index, log index, then digest. This is a
    latest-published-revision rule, not truth or an inference of reviewer intent.
    A missing potentially later revision suppresses earlier positive fallback.
-4. Only after revision selection, exclude revocation, retired authority, and age
+4. Only after revision selection, exclude revocation, unqualified retired authority, and age
    greater than 90 days. The exact 90-day boundary is included. A revoked latest
    revision cannot revive its own predecessor. Revocation can allow an older,
    **different** interaction into the sample. Unresolved relevant revocation/epoch

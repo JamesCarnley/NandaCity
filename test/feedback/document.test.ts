@@ -11,6 +11,18 @@ const codec = async () => {
   return module;
 };
 
+test('v0.2 payload stays inside the unchanged strict v0.1 document envelope', async () => {
+  const { decodeFeedbackDocument } = await codec();
+  const committed = { ...JSON.parse(payload), version: '0.2', supportingBundleDigest: `0x${'ab'.repeat(32)}` };
+  const raw = bytes(JSON.stringify({ ...JSON.parse(literal), payloadBase64: Buffer.from(JSON.stringify(committed)).toString('base64') }));
+  const result = decodeFeedbackDocument(raw);
+  assert.equal(result.envelope.version, '0.1');
+  assert.equal(result.feedback.value.version, '0.2');
+  assert.deepEqual(result.bytes, raw);
+  assert.equal(result.documentHash, keccak256(raw));
+  assert.throws(() => decodeFeedbackDocument(bytes(JSON.stringify({ ...JSON.parse(Buffer.from(raw).toString()), version: '0.2' }))));
+});
+
 test('literal document preserves exact bytes and hashes the envelope separately from its payload', async () => {
   const { decodeFeedbackDocument, encodeFeedbackDocument } = await codec();
   const input = bytes(literal);

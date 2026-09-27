@@ -10,7 +10,7 @@ const MAX_ENCODED_PAYLOAD = Math.ceil((4 * 1024) / 3) * 4;
 
 function typedData(feedback: DecodedFeedback, chainId: number) {
   return {
-    domain: { name: 'NandaCityFeedback', version: '0.1', chainId },
+    domain: { name: 'NandaCityFeedback', version: feedback.value.version, chainId },
     primaryType: 'CityFeedback',
     types: { CityFeedback: [{ name: 'payloadDigest', type: 'bytes32' }] },
     message: { payloadDigest: feedback.digest },

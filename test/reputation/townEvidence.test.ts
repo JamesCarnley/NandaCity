@@ -263,6 +263,7 @@ async function admissionFixture() {
   };
   const epoch = {
     epoch: 'same' as const, qualification: 'rpc-derived-not-state-proof' as const,
+    ownerEpoch: 'uninterrupted' as const, deauthorization: 'absent' as const,
     basis: { blockNumber: interaction.profile.source.blockNumber, blockHash: interaction.profile.source.blockHash },
     observation: { blockNumber: interaction.profile.source.blockNumber, blockHash: interaction.profile.source.blockHash },
     diagnostics: [],

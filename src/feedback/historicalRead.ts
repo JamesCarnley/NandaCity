@@ -1,12 +1,36 @@
-import { isAddress, zeroAddress, type PublicClient } from 'viem';
+import { isAddress, zeroAddress, type Hex, type PublicClient } from 'viem';
+import { readIdentityFeedbackEpoch, type IdentityContinuityDomain, type IdentityFeedbackEpoch } from '../identity/continuity.js';
 import { readIdentitySnapshot } from '../identity/registry.js';
 import { verifyProfile, type VerifiedProfile } from '../identity/verify.js';
 import { decodeFeedbackDocument, type FeedbackDocument } from './document.js';
 import { readFeedbackPublication, type FeedbackPublicationObservation, type ReadFeedbackPublicationInput } from './publication.js';
-import { decodeSupportingBundle, SupportingBundleError, type SupportingBundle, type SupportingBundleDiagnostic } from './supportingBundle.js';
+import { commitSupportingBundle, decodeSupportingBundle, SupportingBundleError, type SupportingBundle, type SupportingBundleDiagnostic } from './supportingBundle.js';
 import { verifyHistoricalFeedback, type HistoricalFeedbackFinding } from './verify.js';
 
 export type ReadHistoricalFeedbackInput = ReadFeedbackPublicationInput & { bundleBytes: Uint8Array | null };
+
+type PublicBasis = { blockNumber: string; blockHash: Hex };
+export type FeedbackCarryForwardObservation = {
+  historical: HistoricalFeedbackObservation;
+  epoch: IdentityFeedbackEpoch | null;
+  bundleCommitment: 'matched' | 'mismatched' | 'unavailable' | 'uncommitted';
+  carryForward: {
+    status: 'qualified' | 'ineligible' | 'unknown';
+    qualification: 'rpc-derived-not-state-proof';
+    reasons: ('legacy-uncommitted' | 'bundle-unavailable' | 'bundle-commitment-mismatch' | 'domain-mismatch' |
+      'historical-evidence-unqualified' | 'publication-unqualified' | 'epoch-unknown' | 'ownership-transferred' |
+      'deauthorization-observed' | 'runtime-not-retired' | 'publication-not-before-retirement' |
+      'basis-order-invalid' | 'basis-recheck-failed' | 'committed-before-runtime-retirement')[];
+    basis?: { documentDigest: Hex; bundleDigest: Hex; original: PublicBasis; publication: PublicBasis;
+      retirement: PublicBasis; observation: PublicBasis };
+  };
+};
+
+export type ReadFeedbackCarryForwardInput = ReadHistoricalFeedbackInput & {
+  identityDomain: IdentityContinuityDomain;
+  limits: { maxBlocks: number; maxLogs: number };
+  signal?: AbortSignal;
+};
 type NotEvaluatedReason = 'bundle-absent' | 'bundle-incomplete' | 'bundle-malformed' |
   'document-unavailable' | 'document-malformed';
 type AuthorityDiagnostic = NotEvaluatedReason | 'request-domain-mismatch' | 'feedback-domain-mismatch' |
@@ -195,4 +219,106 @@ export async function readHistoricalFeedback(input: ReadHistoricalFeedbackInput)
     }
   }
   return { bundle: bundleFinding, originalAuthority: authority, publication, historical, answerEvidence: 'not-supplied' };
+}
+
+/** Exact byte commitment before runtime retirement, not service-use or compromise time.
+ * The caller supplies a bounded transport (ranking lends its existing aggregate budget).
+ * All conclusions are re-derived from raw evidence; no supplied qualification is accepted.
+ */
+export async function readFeedbackCarryForward(input: ReadFeedbackCarryForwardInput): Promise<FeedbackCarryForwardObservation> {
+  const copied = { ...input, domain: { ...input.domain }, identityDomain: { ...input.identityDomain,
+    knownImplementation: { ...input.identityDomain.knownImplementation } }, limits: { ...input.limits },
+    eventRef: { ...input.eventRef }, documentBytes: input.documentBytes && new Uint8Array(input.documentBytes),
+    bundleBytes: input.bundleBytes && new Uint8Array(input.bundleBytes) };
+  // Cancellation is checked around every awaited RPC, including inside reused readers.
+  const methods = new Set(['getChainId', 'getBlock', 'getTransactionReceipt', 'readContract', 'getStorageAt', 'getCode', 'request']);
+  const client = new Proxy(input.client, { get(target, key) {
+    const value = Reflect.get(target, key);
+    if (typeof key !== 'string' || !methods.has(key) || typeof value !== 'function') return value;
+    return async (...args: unknown[]) => {
+      copied.signal?.throwIfAborted();
+      const result: unknown = await Reflect.apply(value, target, args);
+      copied.signal?.throwIfAborted();
+      return result;
+    };
+  } });
+  const historical = await readHistoricalFeedback({ ...copied, client });
+  const result: FeedbackCarryForwardObservation = { historical, epoch: null, bundleCommitment: 'unavailable',
+    carryForward: { status: 'unknown', qualification: 'rpc-derived-not-state-proof', reasons: [] } };
+  const conclude = (status: FeedbackCarryForwardObservation['carryForward']['status'],
+    reason: FeedbackCarryForwardObservation['carryForward']['reasons'][number]) => {
+    result.carryForward.status = status; result.carryForward.reasons = [reason]; return result;
+  };
+  let bundle: ReturnType<typeof commitSupportingBundle> | undefined;
+  let document: FeedbackDocument | undefined;
+  try { if (copied.bundleBytes) bundle = commitSupportingBundle(copied.bundleBytes); } catch { /* controlled finding below */ }
+  try { if (copied.documentBytes) document = decodeFeedbackDocument(copied.documentBytes); } catch { /* same */ }
+  if (document?.feedback.value.version === '0.1') result.bundleCommitment = 'uncommitted';
+  else if (document && bundle) result.bundleCommitment = document.feedback.value.supportingBundleDigest === bundle.digest
+    ? 'matched' : 'mismatched';
+  if (!bundle || !document) return conclude('unknown', 'bundle-unavailable');
+  const request = bundle.request.statement.value;
+  const identity = copied.identityDomain, domain = copied.domain;
+  if (identity.chainId !== domain.chainId || !same(identity.registry, domain.identityRegistry) ||
+      !same(identity.genesisHash, domain.genesisHash) || request.service.agent.chainId !== domain.chainId ||
+      !same(request.service.agent.registry, identity.registry)) return conclude('ineligible', 'domain-mismatch');
+  const observation = historical.publication.observation;
+  if (!observation) return conclude('unknown', 'publication-unqualified');
+  result.epoch = await readIdentityFeedbackEpoch(client, { domain: identity,
+    agent: { ...request.service.agent, registry: request.service.agent.registry as Hex },
+    basis: { blockNumber: BigInt(request.profileBasis.blockNumber), blockHash: request.profileBasis.blockHash as Hex },
+    observation: { blockNumber: copied.observationBlock, blockHash: observation.blockHash },
+    limits: copied.limits, ...(copied.signal ? { signal: copied.signal } : {}) });
+  const epoch = result.epoch;
+  if (result.bundleCommitment === 'uncommitted') return conclude('ineligible', 'legacy-uncommitted');
+  if (result.bundleCommitment !== 'matched') return conclude('ineligible', 'bundle-commitment-mismatch');
+  const findings = historical.historical.status === 'evaluated' ? historical.historical.findings : null;
+  if (historical.originalAuthority.status !== 'matched' || !findings ||
+      [findings.feedbackSignature, findings.requestSignature, findings.acceptanceSignature].some((value) => value !== 'valid') ||
+      [findings.reviewerBinding, findings.requestCallerBinding, findings.serviceLink, findings.registryDomain,
+        findings.requestLink, findings.acceptanceLink, findings.originalProfileBasis, findings.acceptanceSignerBinding]
+        .some((value) => value !== 'matched') || findings.claimedTime !== 'consistent' ||
+      !['matched', 'post-deadline-reviewer-claim'].includes(findings.resultEvidence) ||
+      ((bundle.completion || document.feedback.value.result.kind === 'completion') && (findings.completionSignature !== 'valid' ||
+        findings.completionLink !== 'matched' || findings.completionSignerBinding !== 'matched'))) {
+    return conclude('unknown', 'historical-evidence-unqualified');
+  }
+  const publication = historical.publication;
+  if (publication.publication !== 'matched' || !publication.source || publication.claimedFeedbackTime !== 'not-after-publication') {
+    return conclude('unknown', 'publication-unqualified');
+  }
+  if (epoch.epoch === 'unknown' || epoch.ownerEpoch === 'unknown' || epoch.deauthorization === 'unknown') {
+    return conclude('unknown', 'epoch-unknown');
+  }
+  const retirement = epoch.firstRuntimeRetirement;
+  const original = { blockNumber: request.profileBasis.blockNumber, blockHash: request.profileBasis.blockHash as Hex };
+  try {
+    const bases = new Map<string, Hex>();
+    for (const basis of [original, publication.source, observation, ...(retirement ? [retirement] : []),
+      ...(epoch.eventBases ?? []), { blockNumber: '0', blockHash: domain.genesisHash }]) {
+      const prior = bases.get(basis.blockNumber);
+      if (prior && !same(prior, basis.blockHash)) throw new Error();
+      bases.set(basis.blockNumber, basis.blockHash);
+    }
+    for (const [number, hash] of bases) {
+      const block = await client.getBlock({ blockNumber: BigInt(number) });
+      if (block.number?.toString() !== number || !block.hash || !same(block.hash, hash)) throw new Error();
+    }
+  } catch {
+    result.epoch = { ...epoch, epoch: 'unknown', ownerEpoch: 'unknown', deauthorization: 'unknown',
+      diagnostics: [...epoch.diagnostics, 'composition-basis-recheck-failed'] };
+    return conclude('unknown', 'basis-recheck-failed');
+  }
+  if (epoch.ownerEpoch === 'transferred') return conclude('ineligible', 'ownership-transferred');
+  if (epoch.deauthorization === 'observed') return conclude('ineligible', 'deauthorization-observed');
+  if (!retirement) return conclude('ineligible', 'runtime-not-retired');
+  if (BigInt(publication.source.blockNumber) >= BigInt(retirement.blockNumber)) {
+    return conclude('ineligible', 'publication-not-before-retirement');
+  }
+  if (BigInt(request.profileBasis.blockNumber) > BigInt(publication.source.blockNumber) ||
+      BigInt(retirement.blockNumber) > copied.observationBlock) return conclude('ineligible', 'basis-order-invalid');
+  const publicBasis = ({ blockNumber, blockHash }: PublicBasis): PublicBasis => ({ blockNumber, blockHash });
+  result.carryForward.basis = { documentDigest: document.documentHash, bundleDigest: bundle.digest,
+    original, publication: publicBasis(publication.source), retirement: publicBasis(retirement), observation: publicBasis(observation) };
+  return conclude('qualified', 'committed-before-runtime-retirement');
 }
