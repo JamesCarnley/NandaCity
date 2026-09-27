@@ -34,6 +34,15 @@ connected-wallet/passkey or ERC-1271 caller UX. Public-chain deployment, live ci
 answers, real operator onboarding, an interactive UI and deployed services remain
 outside this prototype.
 
+The opt-in [HTTPS-origin comparison](docs/origin-comparison.md) runs one synthetic
+Chicago service through generic discovery in both real Indexes and the shared
+HTTPS task runtime. A separate consumer verifies a retained negative review after
+provider/archive loss. It uses a temporary local CA, current origin-key attribution
+and a finite reviewer-declared snapshot—not independent historical authority.
+Run `NANDA_INDEX_CHECKOUT=/absolute/path/to/pinned/index npm run demo:origin`.
+Ethereum remains the default; no automatic authority fallback or native Town
+origin pass badge is provided.
+
 The companion [NANDA Index fork](https://github.com/JamesCarnley/nanda-index-v2)
 provides exact per-service filtering and optional, read-only ERC-8004 following.
 The local City fixture publishes six profiles on its own Anvil and launches two
@@ -54,7 +63,7 @@ it does not fetch an AgentCard URL.
 - Docker on a local Unix socket, with the `postgres:16` image available (or
   permission to pull it), for the two-Index integration check and demo
 - A clean checkout of public `JamesCarnley/nanda-index-v2` at pinned commit
-  `416954077d408ab4de1e096414f004f02ee8ff10`, with `npm ci` run in its
+  `b9c6ccef4907c5dc3c7d9d898cf671207166f435`, with `npm ci` run in its
   `server/` directory
 - Python 3.12.13 and a clean checkout of public `JamesCarnley/nandatown` at
   `bf8f226b4d7ae9543bd73995c000c64c7dcd7e09`, installed editable into a separate
@@ -75,7 +84,7 @@ No paid account, hosted RPC, wallet, API key, or environment secret is needed.
 
 ```sh
 git clone https://github.com/JamesCarnley/nanda-index-v2 /absolute/path/to/nanda-index-v2
-git -C /absolute/path/to/nanda-index-v2 checkout 416954077d408ab4de1e096414f004f02ee8ff10
+git -C /absolute/path/to/nanda-index-v2 checkout b9c6ccef4907c5dc3c7d9d898cf671207166f435
 npm ci --prefix /absolute/path/to/nanda-index-v2/server
 git clone https://github.com/JamesCarnley/nandatown /absolute/path/to/nandatown
 git -C /absolute/path/to/nandatown checkout bf8f226b4d7ae9543bd73995c000c64c7dcd7e09

@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: JamesCarnley/nanda-index-v2
-          ref: 416954077d408ab4de1e096414f004f02ee8ff10
+          ref: b9c6ccef4907c5dc3c7d9d898cf671207166f435
           path: index-checkout
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

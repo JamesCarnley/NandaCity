@@ -1,11 +1,9 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse, type RequestListener, type Server } from 'node:http';
 
 import { digestBytes } from '../identity/profile.js';
-import type { VerifiedProfile } from '../identity/verify.js';
-import { decodeEnvelope, signProviderStatement } from '../interaction/signatures.js';
-import { isUtcSecond, type CityAcceptance, type CityCompletion, type CityRequest, type SignedEnvelope } from '../interaction/schema.js';
-import { verifyInteraction, type ContinuityFinding } from '../interaction/verify.js';
+import { isUtcSecond, type CityAcceptance, type CityCompletion, type CityRequest } from '../interaction/schema.js';
+import { AuthorityObservationError, createEthereumRuntimeStrategy, type AuthorityObservation, type RuntimeAuthority, type RuntimeRequest, type RuntimeStrategy } from './strategy.js';
 import type { PrivateKeyAccount } from 'viem/accounts';
 import { syntheticEveningPlan } from './answer.js';
 import { CityTaskStore } from './store.js';
@@ -31,12 +29,7 @@ const MAX_ANSWER_BYTES = 256 * 1024;
 const DEFAULT_EXECUTION_TIMEOUT_MS = 5_000;
 const MAX_EXECUTION_TIMEOUT_MS = 60_000;
 
-export type AuthorityObservation = {
-  basisProfile: VerifiedProfile | null;
-  currentProfile: VerifiedProfile | null;
-  continuity: ContinuityFinding;
-  observedAt: string;
-};
+export type { AuthorityObservation } from './strategy.js';
 
 export type ExecutionContext = { taskId: string; contextId: string; signal: AbortSignal };
 
@@ -47,6 +40,16 @@ export type LoopbackServiceOptions = {
   now: () => string;
   executionTimeoutMs?: number;
   execute?: (request: CityRequest, context: ExecutionContext) => Promise<Uint8Array>;
+};
+
+export type StrategyServiceOptions<Request extends RuntimeRequest, Envelope, Profile> = {
+  storeDirectory: string;
+  runtimeSigner: PrivateKeyAccount;
+  strategy: RuntimeStrategy<Request, Envelope, Profile>;
+  now: () => string;
+  executionTimeoutMs?: number;
+  execute?: (request: Request, context: ExecutionContext) => Promise<Uint8Array>;
+  server?: { protocol: 'http' | 'https'; create: (handler: RequestListener) => Server };
 };
 
 export type LoopbackA2AService = {
@@ -62,34 +65,19 @@ class RpcFault extends Error {
 
 class ExecutionTimeoutError extends Error {}
 
-type AcceptedFinding = Awaited<ReturnType<typeof verifyInteraction>>;
-type AuthorityCheck =
-  | { observation: AuthorityObservation; finding: AcceptedFinding }
+type AuthorityCheck<Profile> =
+  | RuntimeAuthority<Profile>
   | { reason: string };
 
 function rpcFault(code: number, message: string, reason?: string): RpcFault {
   return new RpcFault({ code, message, ...(reason ? { data: { reason } } : {}) });
 }
 
-function interactionKey(request: CityRequest): string {
-  const agent = request.service.agent;
-  return [
-    request.service.method,
-    agent.chainId,
-    agent.registry.toLowerCase(),
-    agent.agentId,
-    request.caller.method,
-    request.caller.chainId,
-    request.caller.address.toLowerCase(),
-    request.interactionId,
-  ].join(':');
-}
-
 function providerMessage(messageId: string, data: Record<string, unknown>): A2AMessage {
   return { kind: 'message', role: 'agent', messageId, parts: [{ kind: 'data', data }] };
 }
 
-function metadataFor(request: CityRequest, acceptance: SignedEnvelope): Record<string, unknown> {
+function metadataFor(request: RuntimeRequest, acceptance: unknown): Record<string, unknown> {
   return {
     'org.nandacity': {
       subset: 'a2a-0.3-jsonrpc-loopback',
@@ -100,39 +88,17 @@ function metadataFor(request: CityRequest, acceptance: SignedEnvelope): Record<s
   };
 }
 
-function authorityFailureReason(observation: AuthorityObservation, finding: Awaited<ReturnType<typeof verifyInteraction>>): string {
-  if (finding.request.cryptography !== 'valid' || finding.request.signerBinding !== 'matched') return 'request-signature-invalid';
-  if (finding.request.profileBasis === 'mismatched') return 'profile-basis-mismatch';
-  if (finding.request.deadline === 'expired') return 'deadline-expired';
-  if (observation.continuity === 'changed' || finding.request.currentAuthority === 'unauthorized') return 'authority-changed';
-  if (observation.continuity === 'unknown' || finding.request.profileBasis === 'unavailable' ||
-      finding.request.currentAuthority === 'unavailable') return 'authority-unavailable';
-  return 'request-evidence-invalid';
-}
-
-function terminalAuthorityEligible(finding: Awaited<ReturnType<typeof verifyInteraction>>): boolean {
-  const request = finding.request;
-  const acceptance = finding.acceptance;
-  return request.cryptography === 'valid' && request.signerBinding === 'matched' &&
-    request.profileBasis === 'matched' && request.currentAuthority === 'authorized' &&
-    request.continuity === 'unchanged' && request.claimedTime === 'observed' &&
-    acceptance !== undefined && acceptance.cryptography === 'valid' &&
-    acceptance.signerBinding === 'matched' && acceptance.profileBasis === 'matched' &&
-    acceptance.currentAuthority === 'authorized' && acceptance.continuity === 'unchanged' &&
-    acceptance.claimedTime === 'observed' && acceptance.link === 'matched';
-}
-
 function asCityMetadata(task: A2ATask): Record<string, unknown> {
   const existing = task.metadata?.['org.nandacity'];
   if (!existing || typeof existing !== 'object' || Array.isArray(existing)) throw new Error('persisted task lacks City metadata');
   return existing as Record<string, unknown>;
 }
 
-class CityA2ARuntime {
+class CityA2ARuntime<Request extends RuntimeRequest, Envelope, Profile> {
   readonly #running = new Map<string, Promise<void>>();
   #closed = false;
 
-  constructor(private readonly store: CityTaskStore, private readonly options: LoopbackServiceOptions) {}
+  constructor(private readonly store: CityTaskStore<Envelope>, private readonly options: StrategyServiceOptions<Request, Envelope, Profile>) {}
 
   async close(): Promise<void> {
     this.#closed = true;
@@ -154,11 +120,10 @@ class CityA2ARuntime {
 
   async send(value: unknown): Promise<A2ATask> {
     let params: ReturnType<typeof sendParamsSchema.parse>;
-    let decoded: ReturnType<typeof decodeEnvelope>;
+    let decoded: ReturnType<RuntimeStrategy<Request, Envelope, Profile>['decodeRequest']>;
     try {
       params = sendParamsSchema.parse(value);
-      decoded = decodeEnvelope(cityRequestEnvelopeFromParams(params));
-      if (decoded.statement.value.kind !== 'request') throw new Error('City DataPart must contain a request envelope');
+      decoded = this.options.strategy.decodeRequest(cityRequestEnvelopeFromParams(params));
     } catch {
       throw rpcFault(-32602, 'Invalid method parameters', 'invalid-city-request-part');
     }
@@ -172,14 +137,14 @@ class CityA2ARuntime {
         !params.configuration.acceptedOutputModes.includes('application/json')) {
       throw rpcFault(-32005, 'Incompatible content types', 'json-output-not-accepted');
     }
-    const request = decoded.statement.value;
-    const requestEnvelope = cityRequestEnvelopeFromParams(params) as SignedEnvelope;
-    const key = interactionKey(request);
+    const request = decoded.request;
+    const requestEnvelope = decoded.envelope;
+    const key = this.options.strategy.interactionKey(request);
 
     return this.store.withInteractionLock(key, async () => {
       const existing = this.store.getByInteraction(key);
       if (existing) {
-        if (existing.requestDigest !== decoded.statement.digest) {
+        if (existing.requestDigest !== decoded.digest) {
           throw rpcFault(-32009, 'Interaction key conflicts with different request bytes', 'interaction-key-conflict');
         }
         this.schedule(existing);
@@ -191,39 +156,35 @@ class CityA2ARuntime {
           Date.parse(acceptedAt) > Date.parse(request.deadline)) {
         throw rpcFault(-32011, 'Acceptance time is outside the signed request window', 'acceptance-time-invalid');
       }
-      let observation: AuthorityObservation;
-      try { observation = await this.options.observeAuthority(request); }
-      catch { throw rpcFault(-32010, 'Authority observation unavailable', 'authority-unavailable'); }
-      if (Date.parse(acceptedAt) > Date.parse(observation.observedAt)) {
+      let authority: RuntimeAuthority<Profile>;
+      try { authority = await this.options.strategy.evaluate(requestEnvelope, undefined, this.options.runtimeSigner); }
+      catch (error) {
+        if (error instanceof AuthorityObservationError) throw rpcFault(-32010, 'Authority observation unavailable', 'authority-unavailable');
+        throw error;
+      }
+      if (!isUtcSecond(authority.observedAt)) throw rpcFault(-32010, 'Authority observation time invalid', 'authority-observation-invalid');
+      if (Date.parse(acceptedAt) > Date.parse(authority.observedAt)) {
         throw rpcFault(-32010, 'Authority observation predates acceptance', 'authority-observation-stale');
       }
-      const finding = await verifyInteraction({
-        request: requestEnvelope,
-        basisProfile: observation.basisProfile,
-        currentProfile: observation.currentProfile,
-        continuity: observation.continuity,
-        observedAt: observation.observedAt,
-      });
-      if (!finding.request.usableAtObservation) {
-        const reason = authorityFailureReason(observation, finding);
+      if (!authority.requestUsable) {
+        const reason = authority.failureReason;
         const code = reason === 'request-evidence-invalid' ? -32602 : -32010;
         throw rpcFault(code, 'Request evidence is not currently usable', reason);
       }
-      if (!observation.currentProfile) throw rpcFault(-32010, 'Authority observation unavailable', 'authority-unavailable');
-      if (this.options.runtimeSigner.address.toLowerCase() !==
-          observation.currentProfile.registration['x-nandacity'].receiptSigner.toLowerCase()) {
+      if (!authority.currentProfile) throw rpcFault(-32010, 'Authority observation unavailable', 'authority-unavailable');
+      if (authority.runtimeSigner !== 'authorized') {
         throw rpcFault(-32010, 'Runtime signer is not authorized by the current profile', 'runtime-signer-unauthorized');
       }
 
       const acceptanceValue: CityAcceptance = {
         kind: 'acceptance',
         version: '0.1',
-        requestDigest: decoded.statement.digest,
+        requestDigest: decoded.digest,
         acceptanceId: `0x${randomBytes(32).toString('hex')}`,
         acceptedAt,
         deadline: request.deadline,
       };
-      const acceptance = await signProviderStatement(acceptanceValue, this.options.runtimeSigner, observation.currentProfile);
+      const acceptance = await this.options.strategy.signAcceptance(acceptanceValue, request, this.options.runtimeSigner, authority.currentProfile);
       const taskId = randomUUID();
       const contextId = randomUUID();
       const submitted: A2ATask = {
@@ -253,10 +214,10 @@ class CityA2ARuntime {
         }],
         metadata: metadataFor(request, acceptance),
       };
-      const record: StoredTaskRecord = {
+      const record: StoredTaskRecord<Envelope> = {
         version: '0.1',
         interactionKey: key,
-        requestDigest: decoded.statement.digest,
+        requestDigest: decoded.digest,
         requestEnvelope,
         acceptance,
         task: submitted,
@@ -267,7 +228,7 @@ class CityA2ARuntime {
     });
   }
 
-  private schedule(record: StoredTaskRecord): void {
+  private schedule(record: StoredTaskRecord<Envelope>): void {
     if (this.#closed || record.task.status.state !== 'submitted' || this.#running.has(record.interactionKey)) return;
     let resolveStart!: () => void;
     const start = new Promise<void>((resolve) => { resolveStart = resolve; });
@@ -279,12 +240,8 @@ class CityA2ARuntime {
     setImmediate(resolveStart);
   }
 
-  private async executeAccepted(record: StoredTaskRecord): Promise<void> {
-    const requestStatement = decodeEnvelope(record.requestEnvelope).statement.value;
-    if (requestStatement.kind !== 'request') throw new Error('persisted request has wrong statement kind');
-    const acceptanceStatement = decodeEnvelope(record.acceptance).statement.value;
-    if (acceptanceStatement.kind !== 'acceptance') throw new Error('persisted acceptance has wrong statement kind');
-    const request = requestStatement;
+  private async executeAccepted(record: StoredTaskRecord<Envelope>): Promise<void> {
+    const request = this.options.strategy.decodeRequest(record.requestEnvelope).request;
 
     const workStartedAt = this.options.now();
     const prework = await this.checkAcceptedAuthority(record, workStartedAt);
@@ -293,15 +250,15 @@ class CityA2ARuntime {
       return;
     }
     if (Date.parse(workStartedAt) > Date.parse(request.deadline)) {
-      if (terminalAuthorityEligible(prework.finding) && prework.observation.currentProfile) {
-        await this.failWithExpiredCompletion(record, prework.observation.currentProfile, workStartedAt);
+      if (prework.terminalEligible && prework.currentProfile) {
+        await this.failWithExpiredCompletion(record, prework.currentProfile, workStartedAt);
       } else {
-        await this.failWithoutCompletion(record, authorityFailureReason(prework.observation, prework.finding));
+        await this.failWithoutCompletion(record, prework.failureReason);
       }
       return;
     }
-    if (!prework.finding.allPresentedEvidenceUsableAtObservation || !prework.observation.currentProfile) {
-      await this.failWithoutCompletion(record, authorityFailureReason(prework.observation, prework.finding));
+    if (!prework.allUsable || !prework.currentProfile) {
+      await this.failWithoutCompletion(record, prework.failureReason);
       return;
     }
 
@@ -326,28 +283,28 @@ class CityA2ARuntime {
       return;
     }
     if (Date.parse(recordedAt) > Date.parse(request.deadline)) {
-      if (terminalAuthorityEligible(terminal.finding) && terminal.observation.currentProfile) {
-        await this.failWithExpiredCompletion(record, terminal.observation.currentProfile, recordedAt);
+      if (terminal.terminalEligible && terminal.currentProfile) {
+        await this.failWithExpiredCompletion(record, terminal.currentProfile, recordedAt);
       } else {
-        await this.failWithoutCompletion(record, authorityFailureReason(terminal.observation, terminal.finding));
+        await this.failWithoutCompletion(record, terminal.failureReason);
       }
       return;
     }
-    if (!terminal.finding.allPresentedEvidenceUsableAtObservation || !terminal.observation.currentProfile) {
-      await this.failWithoutCompletion(record, authorityFailureReason(terminal.observation, terminal.finding));
+    if (!terminal.allUsable || !terminal.currentProfile) {
+      await this.failWithoutCompletion(record, terminal.failureReason);
       return;
     }
     const completionValue: CityCompletion = {
       kind: 'completion',
       version: '0.1',
-      acceptanceDigest: decodeEnvelope(record.acceptance).statement.digest,
+      acceptanceDigest: this.options.strategy.decodeAcceptance(record.acceptance).digest,
       recordedAt,
       outcome: 'completed',
       answerDigest: digestBytes(answerBytes),
     };
-    let completion: SignedEnvelope;
+    let completion: Envelope;
     try {
-      completion = await signProviderStatement(completionValue, this.options.runtimeSigner, terminal.observation.currentProfile);
+      completion = await this.options.strategy.signCompletion(completionValue, this.options.strategy.decodeRequest(record.requestEnvelope).request, this.options.runtimeSigner, terminal.currentProfile);
     } catch {
       await this.failWithoutCompletion(record, 'terminal-signing-failed');
       return;
@@ -375,8 +332,8 @@ class CityA2ARuntime {
     await this.store.save({ ...record, task: completed });
   }
 
-  private async runExecutor(request: CityRequest, record: StoredTaskRecord): Promise<Uint8Array> {
-    const execute = this.options.execute ?? (async (cityRequest: CityRequest) => syntheticEveningPlan(cityRequest));
+  private async runExecutor(request: Request, record: StoredTaskRecord<Envelope>): Promise<Uint8Array> {
+    const execute = this.options.execute ?? (async (cityRequest: Request) => syntheticEveningPlan(cityRequest));
     const controller = new AbortController();
     const timeoutMs = this.options.executionTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -399,70 +356,48 @@ class CityA2ARuntime {
     }
   }
 
-  private async checkAcceptedAuthority(record: StoredTaskRecord, claimedAt: string): Promise<AuthorityCheck> {
-    const acceptance = decodeEnvelope(record.acceptance).statement.value;
-    if (acceptance.kind !== 'acceptance') throw new Error('persisted acceptance has wrong statement kind');
+  private async checkAcceptedAuthority(record: StoredTaskRecord<Envelope>, claimedAt: string): Promise<AuthorityCheck<Profile>> {
+    const acceptance = this.options.strategy.decodeAcceptance(record.acceptance);
     if (!isUtcSecond(claimedAt) || Date.parse(claimedAt) < Date.parse(acceptance.acceptedAt)) {
       return { reason: 'terminal-time-invalid' };
     }
-    let observation: AuthorityObservation;
-    const request = decodeEnvelope(record.requestEnvelope).statement.value;
-    if (request.kind !== 'request') return { reason: 'request-evidence-invalid' };
-    try { observation = await this.options.observeAuthority(request); }
-    catch { return { reason: 'authority-unavailable' }; }
-    if (!isUtcSecond(observation.observedAt)) return { reason: 'authority-observation-invalid' };
-    if (Date.parse(claimedAt) > Date.parse(observation.observedAt)) {
-      return { reason: 'authority-observation-stale' };
-    }
-    try {
-      const finding = await verifyInteraction({
-        request: record.requestEnvelope,
-        acceptance: record.acceptance,
-        basisProfile: observation.basisProfile,
-        currentProfile: observation.currentProfile,
-        continuity: observation.continuity,
-        observedAt: observation.observedAt,
-      });
-      if (finding.request.currentAuthority === 'authorized' && observation.currentProfile &&
-          this.options.runtimeSigner.address.toLowerCase() !==
-            observation.currentProfile.registration['x-nandacity'].receiptSigner.toLowerCase()) {
-        return { reason: 'runtime-signer-unauthorized' };
-      }
-      return { observation, finding };
-    } catch {
-      return { reason: 'request-evidence-invalid' };
-    }
+    let authority: RuntimeAuthority<Profile>;
+    try { authority = await this.options.strategy.evaluate(record.requestEnvelope, record.acceptance, this.options.runtimeSigner); }
+    catch (error) { return { reason: error instanceof AuthorityObservationError ? 'authority-unavailable' : 'request-evidence-invalid' }; }
+    if (!isUtcSecond(authority.observedAt)) return { reason: 'authority-observation-invalid' };
+    if (Date.parse(claimedAt) > Date.parse(authority.observedAt)) return { reason: 'authority-observation-stale' };
+    if (authority.runtimeSigner === 'unauthorized') return { reason: 'runtime-signer-unauthorized' };
+    return authority;
   }
 
   private async finalizeExecutionFailure(
-    record: StoredTaskRecord,
+    record: StoredTaskRecord<Envelope>,
     failureReason: 'provider-error' | 'execution-timeout',
-  ): Promise<StoredTaskRecord> {
-    const requestStatement = decodeEnvelope(record.requestEnvelope).statement.value;
-    if (requestStatement.kind !== 'request') throw new Error('persisted request has wrong statement kind');
+  ): Promise<StoredTaskRecord<Envelope>> {
+    const requestStatement = this.options.strategy.decodeRequest(record.requestEnvelope).request;
     const recordedAt = this.options.now();
     const terminal = await this.checkAcceptedAuthority(record, recordedAt);
     if ('reason' in terminal) return this.failWithoutCompletion(record, terminal.reason);
     if (Date.parse(recordedAt) > Date.parse(requestStatement.deadline)) {
-      if (terminalAuthorityEligible(terminal.finding) && terminal.observation.currentProfile) {
-        return this.failWithExpiredCompletion(record, terminal.observation.currentProfile, recordedAt);
+      if (terminal.terminalEligible && terminal.currentProfile) {
+        return this.failWithExpiredCompletion(record, terminal.currentProfile, recordedAt);
       }
-      return this.failWithoutCompletion(record, authorityFailureReason(terminal.observation, terminal.finding));
+      return this.failWithoutCompletion(record, terminal.failureReason);
     }
-    if (!terminal.finding.allPresentedEvidenceUsableAtObservation || !terminal.observation.currentProfile) {
-      return this.failWithoutCompletion(record, authorityFailureReason(terminal.observation, terminal.finding));
+    if (!terminal.allUsable || !terminal.currentProfile) {
+      return this.failWithoutCompletion(record, terminal.failureReason);
     }
     const completionValue: CityCompletion = {
       kind: 'completion',
       version: '0.1',
-      acceptanceDigest: decodeEnvelope(record.acceptance).statement.digest,
+      acceptanceDigest: this.options.strategy.decodeAcceptance(record.acceptance).digest,
       recordedAt,
       outcome: 'failed',
       reason: 'provider-error',
     };
-    let completion: SignedEnvelope;
+    let completion: Envelope;
     try {
-      completion = await signProviderStatement(completionValue, this.options.runtimeSigner, terminal.observation.currentProfile);
+      completion = await this.options.strategy.signCompletion(completionValue, this.options.strategy.decodeRequest(record.requestEnvelope).request, this.options.runtimeSigner, terminal.currentProfile);
     } catch {
       return this.failWithoutCompletion(record, 'terminal-signing-failed');
     }
@@ -489,20 +424,20 @@ class CityA2ARuntime {
   }
 
   private async failWithExpiredCompletion(
-    record: StoredTaskRecord,
-    currentProfile: VerifiedProfile,
+    record: StoredTaskRecord<Envelope>,
+    currentProfile: Profile,
     recordedAt: string,
-  ): Promise<StoredTaskRecord> {
+  ): Promise<StoredTaskRecord<Envelope>> {
     const completionValue: CityCompletion = {
       kind: 'completion',
       version: '0.1',
-      acceptanceDigest: decodeEnvelope(record.acceptance).statement.digest,
+      acceptanceDigest: this.options.strategy.decodeAcceptance(record.acceptance).digest,
       recordedAt,
       outcome: 'expired',
     };
-    let completion: SignedEnvelope;
+    let completion: Envelope;
     try {
-      completion = await signProviderStatement(completionValue, this.options.runtimeSigner, currentProfile);
+      completion = await this.options.strategy.signCompletion(completionValue, this.options.strategy.decodeRequest(record.requestEnvelope).request, this.options.runtimeSigner, currentProfile);
     } catch {
       return this.failWithoutCompletion(record, 'terminal-signing-failed');
     }
@@ -528,7 +463,7 @@ class CityA2ARuntime {
     return next;
   }
 
-  private async failWithoutCompletion(record: StoredTaskRecord, reason: string): Promise<StoredTaskRecord> {
+  private async failWithoutCompletion(record: StoredTaskRecord<Envelope>, reason: string): Promise<StoredTaskRecord<Envelope>> {
     const failedAt = this.options.now();
     const metadata = { ...asCityMetadata(record.task), failureReason: reason };
     const failed: A2ATask = {
@@ -578,7 +513,7 @@ function requestId(value: unknown): JsonRpcId {
   return typeof id === 'string' || (typeof id === 'number' && Number.isInteger(id)) || id === null ? id : null;
 }
 
-async function handleRpc(runtime: CityA2ARuntime, value: unknown): Promise<JsonRpcResponse> {
+async function handleRpc<Request extends RuntimeRequest, Envelope, Profile>(runtime: CityA2ARuntime<Request, Envelope, Profile>, value: unknown): Promise<JsonRpcResponse> {
   const id = requestId(value);
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw rpcFault(-32600, 'Invalid Request', 'invalid-json-rpc-request');
@@ -604,14 +539,20 @@ async function handleRpc(runtime: CityA2ARuntime, value: unknown): Promise<JsonR
 }
 
 export async function startLoopbackA2AService(options: LoopbackServiceOptions): Promise<LoopbackA2AService> {
+  return startStrategyA2AService({ ...options, strategy: createEthereumRuntimeStrategy(options.observeAuthority) });
+}
+
+export async function startStrategyA2AService<Request extends RuntimeRequest, Envelope, Profile>(
+  options: StrategyServiceOptions<Request, Envelope, Profile>,
+): Promise<LoopbackA2AService> {
   const executionTimeoutMs = options.executionTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS;
   if (!Number.isSafeInteger(executionTimeoutMs) || executionTimeoutMs < 1 ||
       executionTimeoutMs > MAX_EXECUTION_TIMEOUT_MS) {
     throw new Error(`executionTimeoutMs must be an integer from 1 to ${MAX_EXECUTION_TIMEOUT_MS}`);
   }
-  const store = await CityTaskStore.open(options.storeDirectory);
+  const store = await CityTaskStore.open(options.storeDirectory, options.strategy.parseRecord);
   const runtime = new CityA2ARuntime(store, { ...options, executionTimeoutMs });
-  const server = createServer(async (request, response) => {
+  const server = (options.server?.create ?? createServer)(async (request, response) => {
     if (request.method !== 'POST' || request.url !== '/') {
       response.statusCode = 404;
       response.end();
@@ -644,7 +585,7 @@ export async function startLoopbackA2AService(options: LoopbackServiceOptions): 
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('loopback A2A server did not publish a TCP port');
   return {
-    url: `http://127.0.0.1:${address.port}/`,
+    url: `${options.server?.protocol ?? 'http'}://127.0.0.1:${address.port}/`,
     close: async () => {
       await runtime.close();
       await new Promise<void>((resolve, reject) => {

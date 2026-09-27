@@ -6,7 +6,7 @@ identity-only demonstration. It does not rank discovery results.
 
 This is a reproducible local fixture, not a deployed City service. Its public
 Index source pin is `JamesCarnley/nanda-index-v2` commit
-`416954077d408ab4de1e096414f004f02ee8ff10`. The pin is enforced in
+`b9c6ccef4907c5dc3c7d9d898cf671207166f435`. The pin is enforced in
 `src/demo/indexProcesses.ts` and in Linux CI. Build artifacts ignored by Git
 are not trusted: the harness runs `npm run build` from that source before each
 launch.

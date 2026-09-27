@@ -7,8 +7,8 @@ meaning, original interaction links and chain publication.
 ## Run
 
 Use Node 24+, Anvil 1.7.1 and a local Docker Unix socket. Prepare a clean checkout
-of [the public Index source](https://github.com/JamesCarnley/nanda-index-v2/tree/416954077d408ab4de1e096414f004f02ee8ff10)
-at `416954077d408ab4de1e096414f004f02ee8ff10`, with `npm ci` in its `server/` directory.
+of [the public Index source](https://github.com/JamesCarnley/nanda-index-v2/tree/b9c6ccef4907c5dc3c7d9d898cf671207166f435)
+at `b9c6ccef4907c5dc3c7d9d898cf671207166f435`, with `npm ci` in its `server/` directory.
 City rebuilds that exact source before starting either Index.
 
 ```sh

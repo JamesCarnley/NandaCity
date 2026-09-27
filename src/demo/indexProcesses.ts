@@ -10,7 +10,7 @@ import { feedbackSourceId, type FeedbackIndexSource } from '../feedback/indexCli
 const execFileAsync = promisify(execFile);
 export const INDEX_PUBLIC_REPOSITORY = 'https://github.com/JamesCarnley/nanda-index-v2';
 // Updated only after the reviewed public source commit is known.
-export const INDEX_SOURCE_COMMIT = '416954077d408ab4de1e096414f004f02ee8ff10';
+export const INDEX_SOURCE_COMMIT = 'b9c6ccef4907c5dc3c7d9d898cf671207166f435';
 const LABEL = 'org.nandacity.owned-demo';
 
 export type IdentitySourceConfig = {
@@ -18,6 +18,7 @@ export type IdentitySourceConfig = {
   startBlock: string; adapter: 'nandacity-0.1'; confirmations: number;
 };
 export type OwnedIndex = { name: 'A' | 'B'; origin: string; database: string;
+  verifyOrganizationEmail: (orgId: string) => Promise<void>;
   stop: () => Promise<void> };
 export type OwnedIndexEnvironment = {
   indexes: { A: OwnedIndex; B: OwnedIndex };
@@ -32,7 +33,8 @@ export type OwnedIndexEnvironment = {
   containerId: string;
   lifecycle: OwnedLifecycle;
 };
-type IndexOptions = { serverExecutable?: string;
+export type OriginArchiveConfig = { sourceBaseUrl: string; snapshotDigests: string[]; pollMs: number };
+type IndexOptions = { serverExecutable?: string; originArchive?: Record<'A' | 'B', OriginArchiveConfig>;
   feedback?: Partial<Record<'A' | 'B', FeedbackIndexSource & { documentUrls: string[] }>> };
 
 function childEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
@@ -141,13 +143,13 @@ async function assertPinnedCheckout(indexCheckout: string): Promise<string> {
   return checkout;
 }
 
-export function assertOwnedIndexReady(body: unknown, origin: string, sourceId: string): void {
+export function assertOwnedIndexReady(body: unknown, origin: string, sourceId: string | null): void {
   if (!body || typeof body !== 'object') throw new Error('owned Index readiness response malformed');
   const value = body as { observerOrigin?: unknown;
     coverage?: { identitySources?: Array<{ sourceId?: unknown }> } };
   if (value.observerOrigin !== origin) throw new Error('owned Index origin mismatch');
   const sources = value.coverage?.identitySources;
-  if (!Array.isArray(sources) || sources.length !== 1 || sources[0]?.sourceId !== sourceId) {
+  if (!Array.isArray(sources) || (sourceId === null ? sources.length !== 0 : sources.length !== 1 || sources[0]?.sourceId !== sourceId)) {
     throw new Error('owned Index source mismatch');
   }
 }
@@ -162,7 +164,7 @@ export function assertOwnedPostgresTmpfs(mounts: unknown): void {
   }
 }
 
-async function waitReady(origin: string, child: ChildProcess, sourceId: string,
+async function waitReady(origin: string, child: ChildProcess, sourceId: string | null,
   spawnError: () => Error | null): Promise<void> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
@@ -197,13 +199,19 @@ export async function withOwnedIndexes<T>(indexCheckout: string, source: Identit
   return withOwnedLifecycle((lifecycle) => runWithOwnedIndexes(indexCheckout, source, rpcUrls, run, options, lifecycle));
 }
 
-async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySourceConfig,
-  rpcUrls: { A: string; B: string }, run: (owned: OwnedIndexEnvironment) => Promise<T>,
+/** Explicit chain-free lifecycle: no identity/feedback connector, same owned database/process semantics. */
+export async function withOwnedOriginIndexes<T>(indexCheckout: string, originArchive: Record<'A' | 'B', OriginArchiveConfig>,
+  run: (owned: OwnedIndexEnvironment) => Promise<T>): Promise<T> {
+  return withOwnedLifecycle((lifecycle) => runWithOwnedIndexes(indexCheckout, null, null, run, { originArchive }, lifecycle));
+}
+
+async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySourceConfig | null,
+  rpcUrls: { A: string; B: string } | null, run: (owned: OwnedIndexEnvironment) => Promise<T>,
   options: IndexOptions, lifecycle: OwnedLifecycle): Promise<T> {
   for (const feedback of Object.values(options.feedback ?? {})) {
     const { documentUrls, ...domain } = feedback;
     feedbackSourceId(domain);
-    if (domain.chainId !== source.chainId || domain.genesisHash.toLowerCase() !== source.genesisHash.toLowerCase() ||
+    if (!source || domain.chainId !== source.chainId || domain.genesisHash.toLowerCase() !== source.genesisHash.toLowerCase() ||
       domain.identityRegistry.toLowerCase() !== source.registry.toLowerCase() || !Array.isArray(documentUrls)) {
       throw new Error('owned Index feedback/identity source mismatch');
     }
@@ -275,25 +283,47 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
     const env = childEnv({ NODE_ENV: 'development', PORT: String(indexPort),
       API_BASE_URL: origin, BIND_HOST: '127.0.0.1',
       DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:${pgPort}/${database}`,
-      ERC8004_IDENTITY_CONFIG: JSON.stringify({ ...source, rpcUrl: rpcUrls[name], pollMs: 100,
-        maxBlockSpan: 200 }),
+      ERC8004_IDENTITY_CONFIG: source ? JSON.stringify({ ...source, rpcUrl: rpcUrls![name], pollMs: 100,
+        maxBlockSpan: 200 }) : '', ERC8004_FEEDBACK_CONFIG: '', SMTP_URL: 'log',
+      ...(options.originArchive ? { ORIGIN_ARCHIVE_CONFIG: JSON.stringify(options.originArchive[name]) } : {}),
       ...(options.feedback?.[name] ? { ERC8004_FEEDBACK_CONFIG: JSON.stringify({ ...options.feedback[name],
-        rpcUrl: `${rpcUrls[name].replace(/\/$/, '')}/`, pollMs: 100, maxBlockSpan: 128 }) } : {}) });
+        rpcUrl: `${rpcUrls![name].replace(/\/$/, '')}/`, pollMs: 100, maxBlockSpan: 128 }) } : {}) });
     await command('node', ['dist/db/migrate.js'], serverDir, env);
     active();
     const child = spawn(options.serverExecutable ?? 'node', ['dist/server.js'], { cwd: serverDir, env,
-      stdio: ['ignore', 'ignore', 'ignore'] });
+      stdio: ['ignore', 'pipe', 'ignore'] });
+    // Only disposable owned verification links are retained, never full process logs.
+    const verification = new Map<string, string>(); let pendingLine = '';
+    child.stdout!.on('data', (chunk: Buffer) => {
+      pendingLine = (pendingLine + chunk.toString('utf8')).slice(-65536);
+      const lines = pendingLine.split('\n'); pendingLine = lines.pop() ?? '';
+      for (const line of lines) {
+        const match = /^\[email\] verification link for org "([A-Za-z0-9_-]{1,64})" → (\S+)$/.exec(line);
+        if (!match || verification.size >= 32) continue;
+        try {
+          const url = new URL(match[2]!); const token = url.searchParams.get('token');
+          if (url.pathname === '/api/v1/verify-email' && token && /^[A-Za-z0-9_-]{16,256}$/.test(token)) verification.set(match[1]!, token);
+        } catch { /* other process output is discarded */ }
+      }
+    });
     let spawnFailure: Error | null = null;
     child.once('error', (error) => { spawnFailure = error; });
     processes.set(name, child);
-    const sourceId = `erc8004-identity:${source.chainId}:${source.registry.toLowerCase()}`;
+    const sourceId = source ? `erc8004-identity:${source.chainId}:${source.registry.toLowerCase()}` : null;
     try { await waitReady(origin, child, sourceId, () => spawnFailure); active(); }
     catch (error) {
       try { await stopChild(child); processes.delete(name); }
       catch (stopError) { throw new AggregateError([error, stopError], 'Index startup and stop failed'); }
       throw error;
     }
-    return { name, origin, database, stop: async () => {
+    return { name, origin, database, verifyOrganizationEmail: async (orgId) => {
+      const deadline = Date.now() + 5000;
+      while (!verification.has(orgId) && Date.now() < deadline) { active(); await new Promise((resolve) => setTimeout(resolve, 20)); }
+      const token = verification.get(orgId); if (!token) throw new Error('owned verification unavailable');
+      const response = await fetch(`${origin}/api/v1/verify-email?token=${token}`, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
+      verification.delete(orgId);
+      if (!response.ok) throw new Error('owned verification failed');
+    }, stop: async () => {
       if (processes.get(name) !== child) return;
       await stopChild(child);
       if (processes.get(name) === child) processes.delete(name);

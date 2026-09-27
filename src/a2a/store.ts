@@ -4,32 +4,35 @@ import { join } from 'node:path';
 
 import { keccak256, toBytes } from 'viem';
 
-import { storedTaskRecordSchema, type StoredTaskRecord } from './wire.js';
+import { storedTaskRecordSchema, type StoredTaskRecord, type TaskRecordParser } from './wire.js';
+import type { SignedEnvelope } from '../interaction/schema.js';
 
 const MAX_RECORD_BYTES = 1024 * 1024;
 
 function fileNameFor(interactionKey: string): string {
   return `${keccak256(toBytes(interactionKey)).slice(2)}.json`;
 }
-export class CityTaskStore {
+export class CityTaskStore<Envelope = SignedEnvelope> {
   readonly #directory: string;
-  readonly #byInteraction = new Map<string, StoredTaskRecord>();
+  readonly #byInteraction = new Map<string, StoredTaskRecord<Envelope>>();
   readonly #interactionByTask = new Map<string, string>();
   readonly #locks = new Map<string, Promise<void>>();
 
-  private constructor(directory: string) {
+  private constructor(directory: string, private readonly parseRecord: TaskRecordParser<Envelope>) {
     this.#directory = directory;
   }
 
-  static async open(directory: string): Promise<CityTaskStore> {
+  static async open(directory: string): Promise<CityTaskStore>;
+  static async open<Envelope>(directory: string, parseRecord: TaskRecordParser<Envelope>): Promise<CityTaskStore<Envelope>>;
+  static async open<Envelope>(directory: string, parseRecord: TaskRecordParser<Envelope> = storedTaskRecordSchema.parse as TaskRecordParser<Envelope>): Promise<CityTaskStore<Envelope>> {
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const store = new CityTaskStore(directory);
+    const store = new CityTaskStore(directory, parseRecord);
     const names = await readdir(directory);
     for (const name of names.sort()) {
       if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
       const path = join(directory, name);
       if ((await stat(path)).size > MAX_RECORD_BYTES) throw new Error(`stored task exceeds ${MAX_RECORD_BYTES} bytes`);
-      const record = storedTaskRecordSchema.parse(JSON.parse(await readFile(path, 'utf8')));
+      const record = parseRecord(JSON.parse(await readFile(path, 'utf8')));
       if (fileNameFor(record.interactionKey) !== name) throw new Error('stored task filename does not match interaction key');
       if (store.#byInteraction.has(record.interactionKey) || store.#interactionByTask.has(record.task.id)) {
         throw new Error('stored task identifiers are not unique');
@@ -40,17 +43,17 @@ export class CityTaskStore {
     return store;
   }
 
-  getByInteraction(interactionKey: string): StoredTaskRecord | undefined {
+  getByInteraction(interactionKey: string): StoredTaskRecord<Envelope> | undefined {
     return this.#byInteraction.get(interactionKey);
   }
 
-  getByTask(taskId: string): StoredTaskRecord | undefined {
+  getByTask(taskId: string): StoredTaskRecord<Envelope> | undefined {
     const interaction = this.#interactionByTask.get(taskId);
     return interaction ? this.#byInteraction.get(interaction) : undefined;
   }
 
-  async save(record: StoredTaskRecord): Promise<void> {
-    const validated = storedTaskRecordSchema.parse(record);
+  async save(record: StoredTaskRecord<Envelope>): Promise<void> {
+    const validated = this.parseRecord(record);
     const serialized = JSON.stringify(validated);
     if (Buffer.byteLength(serialized, 'utf8') > MAX_RECORD_BYTES) throw new Error('stored task record is too large');
     const destination = join(this.#directory, fileNameFor(validated.interactionKey));

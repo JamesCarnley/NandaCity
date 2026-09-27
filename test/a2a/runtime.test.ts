@@ -301,6 +301,53 @@ test('missing authority fails before acceptance and changed authority prevents c
   assert.equal(changedExecutions, 0);
 });
 
+test('Ethereum runtime rotation retains authority-changed classification after strategy extraction', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nandacity-a2a-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const fixture = makeInteractionFixture();
+  let observations = 0;
+  const service = await startLoopbackA2AService({
+    storeDirectory: directory, runtimeSigner: fixture.runtime, now: () => NOW,
+    observeAuthority: async () => {
+      const changed = observations++ > 0;
+      return { basisProfile: fixture.profile,
+        currentProfile: changed ? { ...fixture.profile, registration: { ...fixture.profile.registration,
+          'x-nandacity': { ...fixture.profile.registration['x-nandacity'], receiptSigner: fixture.stranger.address.toLowerCase() } } } : fixture.profile,
+        continuity: changed ? 'changed' : 'unchanged', observedAt: NOW };
+    },
+    execute: async () => { throw new Error('must not execute after authority changes'); },
+  });
+  t.after(() => service.close());
+  const accepted = resultTask(await rpc(service.url, 1, 'message/send', sendParams(await signRequest(fixture.request, fixture.caller))));
+  const terminal = await pollTerminal(service.url, accepted.id);
+  assert.equal(cityMetadata(terminal).failureReason, 'authority-changed');
+  assert.equal(cityMetadata(terminal).completion, undefined);
+});
+
+test('Ethereum malformed observation clocks preserve initial and terminal error classifications', async (t) => {
+  for (const beforeAcceptance of [true, false]) {
+    const directory = await mkdtemp(join(tmpdir(), 'nandacity-a2a-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const fixture = makeInteractionFixture();
+    let observations = 0;
+    const service = await startLoopbackA2AService({
+      storeDirectory: directory, runtimeSigner: fixture.runtime, now: () => NOW,
+      observeAuthority: async () => ({ basisProfile: fixture.profile, currentProfile: fixture.profile,
+        continuity: 'unchanged', observedAt: beforeAcceptance || observations++ > 0 ? 'invalid-clock' : NOW }),
+    });
+    t.after(() => service.close());
+    const response = await rpc(service.url, 1, 'message/send', sendParams(await signRequest(fixture.request, fixture.caller)));
+    if (beforeAcceptance) {
+      assert.ok('error' in response);
+      assert.equal(response.error.code, -32603);
+    } else {
+      const terminal = await pollTerminal(service.url, resultTask(response).id);
+      assert.equal(cityMetadata(terminal).failureReason, 'authority-observation-invalid');
+      assert.equal(cityMetadata(terminal).completion, undefined);
+    }
+  }
+});
+
 test('A2A JSON-RPC rejects unknown methods, missing tasks, and malformed City request parts', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nandacity-a2a-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

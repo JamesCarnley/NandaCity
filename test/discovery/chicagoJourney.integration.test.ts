@@ -10,7 +10,7 @@ test('owned Chicago journey selects a real Index candidate and independently ver
     const result = await runChicagoJourney(checkout);
     assert.equal(result.mode, 'local-fixture');
     assert.equal(result.city, 'Chicago');
-    assert.equal(result.indexSourceCommit, '416954077d408ab4de1e096414f004f02ee8ff10');
+    assert.equal(result.indexSourceCommit, 'b9c6ccef4907c5dc3c7d9d898cf671207166f435');
     assert.equal(result.indexOrigins.length, 2);
     assert.notEqual(result.identities.owner, result.identities.runtime);
     assert.notEqual(result.identities.owner, result.identities.caller);

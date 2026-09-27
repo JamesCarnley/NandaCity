@@ -90,7 +90,11 @@ export const storedTaskRecordSchema = z.strictObject({
   task: a2aTaskSchema,
 });
 
-export type StoredTaskRecord = z.infer<typeof storedTaskRecordSchema>;
+export type StoredTaskRecord<Envelope = z.infer<typeof envelopeSchema>> =
+  Omit<z.infer<typeof storedTaskRecordSchema>, 'requestEnvelope' | 'acceptance'> & {
+    requestEnvelope: Envelope; acceptance: Envelope;
+  };
+export type TaskRecordParser<Envelope> = (value: unknown) => StoredTaskRecord<Envelope>;
 
 export type JsonRpcId = string | number | null;
 export type JsonRpcError = { code: number; message: string; data?: Record<string, unknown> };

@@ -126,6 +126,13 @@ test('readiness rejects a different server origin or identity source', () => {
   /source mismatch/);
 });
 
+test('explicit origin readiness requires empty identitySources, not an invented chain source', () => {
+  const origin = 'http://127.0.0.1:31001';
+  assert.doesNotThrow(() => assertOwnedIndexReady({ observerOrigin: origin, coverage: { identitySources: [] } }, origin, null));
+  assert.throws(() => assertOwnedIndexReady({ observerOrigin: origin,
+    coverage: { identitySources: [{ sourceId: 'invented' }] } }, origin, null), /source mismatch/);
+});
+
 test('child command failures do not expose ephemeral database credentials', () => {
   const underlying = new Error('Command failed: docker exec -e PGPASSWORD=secret-value ...');
   const reported = safeCommandFailure('docker', underlying);

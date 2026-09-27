@@ -8,7 +8,7 @@ available, and `NANDA_INDEX_CHECKOUT` must point to a clean checkout of the
 public pinned Index commit in `src/demo/indexProcesses.ts`. The harness builds
 that source before launching it. Tests use Node's test runner through `tsx`
 under `test/identity/`, `test/discovery/`, `test/interaction/`, `test/feedback/`
-and `test/reputation/`. Unit and full checks also require `NANDATOWN_CHECKOUT`
+and `test/reputation/`, plus the separate `test/origin/` profile. Unit and full checks also require `NANDATOWN_CHECKOUT`
 at the clean public Town pin and `NANDATOWN_PYTHON` pointing to the Python 3.12.13
 virtual-environment entry, not its resolved global target. Use the exact pins
 and separate editable-install setup in [README](README.md#setup-and-checks) and
@@ -84,6 +84,13 @@ ranking and generated-credential account/recovery demonstrations:
 - a two-Index feedback retention drill, bounded raw-evidence reader and separate
   historical verifier, including provider loss, reorg, revocation and empty-DB
   missing-byte evidence. Index coverage remains self-reported, not complete history.
+- a separate synthetic HTTPS-origin comparison using the same task runtime,
+  generic organization discovery, signed finite reviewer snapshots and two real
+  Index databases, with a fresh private-evidence consumer after source loss.
+  Origin current TLS authority, claimed record age and selected-snapshot coverage
+  are distinct from independently proven history. Ethereum remains the default;
+  there is no automatic fallback or native Town origin pass badge. See
+  [origin comparison](docs/origin-comparison.md).
 
 Do not describe snapshot verification as current chain truth, liveness, safety,
 trust, or endorsement. `ownerAtPublication` must remain subordinate to the

@@ -1,6 +1,8 @@
 import { z } from 'zod';
+import { compare, scoreGroups, selectLatestByPair, WINDOW_SECONDS } from './engine.js';
+import type { Rational } from './engine.js';
+export type { Rational } from './engine.js';
 
-const WINDOW_SECONDS = 90 * 86400;
 const key = z.string().min(1).max(160).regex(/^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/);
 const digest = z.string().regex(/^0x[0-9a-f]{64}$/);
 const block = z.string().max(78).regex(/^(0|[1-9][0-9]*)$/).refine((s) => BigInt(s) < (1n << 256n));
@@ -62,8 +64,6 @@ const inputSchema = z.strictObject({
 export type PolicyInput = z.infer<typeof inputSchema>;
 type Review = PolicyInput['reviews'][number];
 type Candidate = PolicyInput['candidates'][number];
-export type Rational = { numerator: string; denominator: string };
-type Fraction = { n: bigint; d: bigint };
 export type ReviewReason =
   | 'contributing' | 'sample-cap' | 'superseded' | 'duplicate-publication'
   | 'revoked' | 'aged-out' | 'retired-authority' | 'unknown-evidence' | 'unresolved-revision'
@@ -93,8 +93,6 @@ export type PolicyResult = {
   evidence: { id: string; service: string; reason: string }[];
   selection: { rated: string[]; newcomers: string[]; unassessed: string[]; unresolved: string[]; explore: string[]; excluded: string[] };
 };
-
-const compare = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
 
 /** Reject accessors, custom prototypes, cycles and non-JSON values before schema parsing. */
 function copyJson(input: unknown): unknown {
@@ -210,18 +208,6 @@ function parse(input: unknown): PolicyInput {
   return parsed;
 }
 
-function fraction(n: bigint, d: bigint): Fraction {
-  let a = n < 0n ? -n : n; let b = d;
-  while (b !== 0n) { const remainder = a % b; a = b; b = remainder; }
-  return { n: n / a, d: d / a };
-}
-const add = (a: Fraction, b: Fraction): Fraction => fraction(a.n * b.d + b.n * a.d, a.d * b.d);
-const mean = (values: Fraction[]): Fraction => {
-  const sum = values.reduce(add, { n: 0n, d: 1n });
-  return fraction(sum.n, sum.d * BigInt(values.length));
-};
-const rational = (value: Fraction): Rational => ({ numerator: String(value.n), denominator: String(value.d) });
-
 function order(a: Review, b: Review): number {
   const left = BigInt(a.publication.block); const right = BigInt(b.publication.block);
   return (left < right ? -1 : left > right ? 1 : 0) ||
@@ -300,12 +286,10 @@ function selectReviews(input: PolicyInput, candidate: Candidate, byId: Map<strin
     anchors.push({ review: anchor, unknown });
   }
   const eligible: Review[] = [];
-  const known = anchors.filter((anchor) => !anchor.unknown).sort((a, b) => -order(a.review, b.review));
-  const selected = new Set<string>();
-  for (const { review } of known) {
-    const pair = JSON.stringify([review.reviewer, review.interaction]);
-    if (selected.has(pair)) { byId.get(review.id)!.reason = 'superseded'; continue; }
-    selected.add(pair);
+  const latest = selectLatestByPair(anchors.filter((anchor) => !anchor.unknown),
+    (a, b) => order(a.review, b.review), (entry) => JSON.stringify([entry.review.reviewer, entry.review.interaction]));
+  for (const { review } of latest.superseded) byId.get(review.id)!.reason = 'superseded';
+  for (const { review } of latest.selected) {
     // Missing metadata is a wildcard, not a claim that the review belongs to a
     // different reviewer/interaction. Uncertain first anchors can also move later.
     const possiblyLater = anchors.some((entry) => entry.unknown &&
@@ -341,28 +325,8 @@ function calculateCandidate(input: PolicyInput, candidate: Candidate): Candidate
   const explanations = input.reviews.filter((review) => review.service === candidate.service).map(explain);
   const byId = new Map(explanations.map((explanation) => [explanation.id, explanation]));
   const { eligible, unresolved, priorExcluded } = selectReviews(input, candidate, byId);
-  const groups: GroupResult[] = [];
-  const groupMeans: Fraction[] = [];
-  let interactionCount = 0;
-  for (const group of input.policy.groups) {
-    const reviewers: GroupResult['reviewers'] = [];
-    const reviewerMeans: Fraction[] = [];
-    for (const reviewer of group.reviewers) {
-      const selected = eligible.filter((review) => review.reviewer === reviewer).sort((a, b) => -order(a, b));
-      for (const omitted of selected.slice(3)) byId.get(omitted.id)!.reason = 'sample-cap';
-      const sample = selected.slice(0, 3);
-      if (sample.length === 0) continue;
-      const value = mean(sample.map((review) => ({ n: BigInt(review.rating!), d: 1n })));
-      reviewerMeans.push(value);
-      reviewers.push({ key: reviewer, mean: rational(value), evidence: sample.map((review) => review.id).sort(compare) });
-      interactionCount += sample.length;
-    }
-    if (reviewers.length === 0) continue;
-    const value = mean(reviewerMeans); groupMeans.push(value);
-    groups.push({ key: group.key, mean: rational(value), reviewers });
-  }
-  const sum = groupMeans.reduce(add, { n: 6n, d: 1n });
-  const score = groups.length === 0 ? null : rational(fraction(sum.n, sum.d * BigInt(2 + groups.length)));
+  const { groups, interactionCount, score } = scoreGroups(eligible, input.policy.groups, order,
+    (review) => { byId.get(review.id)!.reason = 'sample-cap'; });
   const admissions = admissionExplanations(input, candidate);
   const profileEligible = candidate.profile.status === 'valid' && candidate.city === input.scope.city && candidate.task === input.scope.task;
   const admitted = profileEligible && admissions.some((admission) => admission.reason === 'accepted');

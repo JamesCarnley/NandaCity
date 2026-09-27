@@ -1,4 +1,6 @@
-import type { CityRequest } from '../interaction/schema.js';
+import type { EveningPlanInput } from './input.js';
+
+type CityRequest = { input: EveningPlanInput };
 
 export type FixtureEmphasis = 'food' | 'culture' | 'travel-value';
 
