@@ -59,6 +59,8 @@ model adapter**: source/model terms, accounts, pricing and spending approval are
 still owner-gated. Expired answers cannot be semantically replayed; receipts and
 earlier byte-check observations remain. A hostile recipient can still copy visible
 content. No live-provider utility or Sepolia rehearsal is claimed.
+An [optional local OpenClaw roster](runtime/openclaw/README.md) supplies three
+small specialist workspaces for integration work; it is not yet a City adapter.
 
 ## Current capabilities and evidence
 
