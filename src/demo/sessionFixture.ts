@@ -58,7 +58,7 @@ export type SessionFixture = {
   recover: (operatorId: string, signal: AbortSignal) => Promise<SessionRecovery>;
 };
 type ExecutorFactory = (service: { operatorId: string; city: City; emphasis: FixtureEmphasis }) => RuntimeExecutor<CityRequest>;
-export type SessionFixtureOptions = { mode?: 'fixture'; executor?: ExecutorFactory } |
+export type SessionFixtureOptions = { mode?: 'fixture'; executor?: ExecutorFactory; answerEngine?: 'openclaw'; executionTimeoutMs?: number } |
   { mode: 'licensed'; executor: ExecutorFactory; retention: LicensedRetention; admittedReviewer: 'accepted' | 'new' };
 
 async function close(server: Server): Promise<void> {
@@ -153,7 +153,7 @@ export async function withSessionFixture<T>(checkout: string, signal: AbortSigna
             return syntheticEveningPlan(request, scope.emphasis);
           };
           if (custom?.retention !== undefined) Object.defineProperty(execute, 'retention', { value: custom.retention, enumerable: true });
-          return { execute, ...(options.mode === 'licensed' ? { retention: options.retention,
+          return { execute, ...(options.mode !== 'licensed' && options.executionTimeoutMs !== undefined ? { executionTimeoutMs: options.executionTimeoutMs } : {}), ...(options.mode === 'licensed' ? { retention: options.retention,
             live: { caller: { method: 'eip155-eoa' as const, chainId: 31337, address: callers[options.admittedReviewer].address.toLowerCase() } } } : {}) };
         };
         const operators: SessionOperator[] = [];

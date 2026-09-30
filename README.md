@@ -55,12 +55,31 @@ Saved HTML/JSON are read-only public snapshots, without action tokens or mutatio
 forms. Authored fixture answers remain exportable. Configured licensed sessions
 can use the same server API, with bounded transient display, intact attribution,
 expiry and receipts-only export. There is **no licensed CLI launcher or concrete
-model adapter**: source/model terms, accounts, pricing and spending approval are
+licensed-source model adapter**: source/model terms, accounts, pricing and spending approval are
 still owner-gated. Expired answers cannot be semantically replayed; receipts and
 earlier byte-check observations remain. A hostile recipient can still copy visible
 content. No live-provider utility or Sepolia rehearsal is claimed.
-An [optional local OpenClaw roster](runtime/openclaw/README.md) supplies three
-small specialist workspaces for integration work; it is not yet a City adapter.
+
+### Add real specialist reasoning
+
+With the [dedicated OpenClaw roster](runtime/openclaw/README.md) configured and
+signed in, use the same demo with real model calls:
+
+```sh
+npm run demo:openclaw -- --index-checkout "$NANDA_INDEX_CHECKOUT" --port 3000
+```
+
+Set your preferences and example budget before asking. Each specialist selects
+and explains a complete plan from the authored fictional options. Its reasoning
+is labelled separately from the catalog facts. The signed A2A journey and feedback
+are real local executions; model opinions are not verified city knowledge.
+Failures do not silently fall back to a canned answer. Tools are disabled at
+OpenClaw configuration level, and no wallet keys or private evidence enter its
+prompt. Only opt-in OpenClaw commands call the model; default tests
+and the fixture demo do not.
+
+See the [five-minute video walkthrough](docs/video-demo.md) for the story,
+controls, rehearsal command and remaining live-data/public-chain gates.
 
 ## Current capabilities and evidence
 

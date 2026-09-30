@@ -50,6 +50,7 @@ export type SessionFeedback = { id: string; invocationId: string; value: number;
 
 export type SessionView = {
   mode: 'fixture' | 'licensed';
+  answerEngine?: 'openclaw';
   licensedHint?: { admittedReviewer: 'accepted' | 'new'; expiresAt: string };
   freshConsumer: { status: 'matched' | 'different' | 'unavailable'; reason: string; observation: { blockNumber: string; blockHash: Hex } } | null;
   originComparison: { phase: string; result?: { discovery: Record<'A' | 'B', number>; retained: Record<'A' | 'B', number>;
@@ -76,7 +77,8 @@ export type SessionOptions = Extract<SessionFixtureOptions, { mode?: 'fixture' }
 };
 const callable = z.custom<(...args: never[]) => unknown>((value) => typeof value === 'function');
 const optionsSchema = z.union([
-  z.strictObject({ mode: z.literal('fixture').optional(), executor: callable.optional() }),
+  z.strictObject({ mode: z.literal('fixture').optional(), executor: callable.optional(), answerEngine: z.literal('openclaw').optional(),
+    executionTimeoutMs: z.number().int().min(1000).max(60000).optional() }).refine((o) => !o.answerEngine || !!o.executor),
   z.strictObject({ mode: z.literal('licensed'), retention: licensedRetentionSchema, admittedReviewer: z.enum(['accepted', 'new']),
     transport: z.custom<TransportConfig>(), budgetDirectory: z.string().min(1),
     inference: z.strictObject({ mode: z.enum(['provider-accounted', 'owned-test']), maxOutputTokens: z.number().int().positive().max(2000),
@@ -98,6 +100,8 @@ const otherActions = [
 ] as const;
 const fixtureActionSchema = z.discriminatedUnion('kind', [...otherActions,
   z.strictObject({ kind: z.literal('invoke'), reviewer: z.enum(['accepted', 'new']), fail: z.boolean().optional() })]);
+const openclawActionSchema = z.discriminatedUnion('kind', [...otherActions,
+  z.strictObject({ kind: z.literal('invoke'), reviewer: z.enum(['accepted', 'new']), fail: z.boolean().optional(), input: eveningPlanInputSchema.optional() })]);
 const licensedActionSchema = z.discriminatedUnion('kind', [...otherActions,
   z.strictObject({ kind: z.literal('invoke'), reviewer: z.enum(['accepted', 'new']), input: eveningPlanInputSchema })]);
 
@@ -107,6 +111,14 @@ type PrivateFeedback = { view: SessionFeedback; prepared?: PreparedFeedbackPubli
   invocation: PrivateInvocation; bundlePath: string; submitted?: FeedbackSubmissionResult };
 function sameIdentity(a: { chainId: number; registry: string; agentId: string }, b: typeof a) {
   return a.chainId === b.chainId && a.registry.toLowerCase() === b.registry.toLowerCase() && a.agentId === b.agentId;
+}
+
+export function demoEveningInput(city: City): EveningPlanInput {
+  return { version: '0.1', capability: 'evening-plan', city,
+    timeWindow: { start: city === 'Chicago' ? '2026-10-02T18:00:00-05:00' : '2026-10-02T18:00:00-04:00',
+      end: city === 'Chicago' ? '2026-10-02T22:00:00-05:00' : '2026-10-02T22:00:00-04:00', timeZone: city === 'Chicago' ? 'America/Chicago' : 'America/New_York' },
+    area: city === 'Chicago' ? 'The Loop' : 'Back Bay', budget: { currency: 'USD', minorUnits: '8500' },
+    transport: ['walk', 'public-transit'], preferences: ['Interactive fixture example'] };
 }
 
 /** Callback receives a status reader immediately, before chain/Index acquisition. */
@@ -128,12 +140,15 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
   let generation = 0; let fixture: SessionFixture | undefined; let abort: AbortController;
   let finished: Promise<void>; let acquired: Promise<void>; let release: () => void;
   let runInOwnedScope: ReturnType<typeof AsyncLocalStorage.snapshot>;
-  const initial = (): SessionView => ({ mode, ...(options.mode === 'licensed' ? { licensedHint: { admittedReviewer: options.admittedReviewer, expiresAt: options.retention.expiresAt } } : {}),
+  const initial = (): SessionView => ({ mode, ...(options.mode !== 'licensed' && options.answerEngine ? { answerEngine: options.answerEngine } : {}), ...(options.mode === 'licensed' ? { licensedHint: { admittedReviewer: options.admittedReviewer, expiresAt: options.retention.expiresAt } } : {}),
     freshConsumer: null, originComparison: null, generation, status: 'starting', lifecycleOperationId: randomUUID(), operators: [], crossOperatorWrite: 'not-tested',
     invocations: [], discovery: null, selection: null, operations: [], feedback: [],
     feedbackCapacity: { total: SESSION_FEEDBACK_CAPACITY, used: 0, exhausted: false }, limitations: [
       mode === 'fixture' ? 'Synthetic fixture answers, three simulated operators and generated 1-of-2 EOA Safes on one host; not independent custody or real city facts.' :
         'Source-backed licensed mode with three simulated operators and generated 1-of-2 EOA Safes on one host. Owned-test inference is not live utility, terms clearance or independent custody.',
+      ...(options.mode !== 'licensed' && options.answerEngine === 'openclaw' ? [
+        'Real subscription-backed OpenClaw reasoning selects from authored fictional options. Model text is opinion, not verified source data or service quality. Synthetic prompts/answers remain in the dedicated OpenClaw volume; City reset does not erase them.',
+        'The model bridge bounds prompt/output bytes, run count and duration. Token usage is reported after dispatch, not an exact preflight or dollar spend guarantee. Failed inference has no canned-answer fallback.' ] : []),
       'The disclosed demo reviewer and curator are local policy inputs, not a public quality endorsement. New reviewers remain unweighted.',
       'RPC-derived canonical observations are not state proofs, finality, complete history, or atomic protection against changes after pre-send checks.',
       'Cancelling owned wallet work stops its process and reads, not an already submitted transaction. Interrupted chain effects remain unresolved without canonical read-back.',
@@ -227,7 +242,8 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
       const basisObservation = await readIdentitySnapshot(chain, entry.candidate.agent, BigInt(decoded.profileBasis.blockNumber));
       const currentObservation = await readIdentitySnapshot(chain, entry.candidate.agent);
       let task: Awaited<ReturnType<typeof rpcTask>> | undefined = await pollTerminalTask(entry.url, entry.view.taskId,
-        mode === 'licensed' ? 65000 : 20000, mode === 'licensed' ? 'live' : 'fixture', signal);
+        options.mode === 'licensed' ? 65000 : options.executionTimeoutMs !== undefined ? options.executionTimeoutMs + 5000 : 20000,
+        options.mode === 'licensed' || options.executionTimeoutMs !== undefined ? 'live' : 'fixture', signal);
       entry.view.outcome = task.status.state === 'completed' ? 'completed' : 'failed';
       let evidence: JourneyEvidence | undefined;
       try {
@@ -286,6 +302,7 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
     }
     signal.throwIfAborted(); const profile = selected.profile, source = profile.source, caller = owned.callers[action.reviewer];
     const city = discovery.city, createdAt = sessionNow();
+    if (options.mode !== 'licensed' && options.answerEngine === 'openclaw' && action.input && action.input.city !== city) throw new Error('request city differs from discovery');
     if (options.mode === 'licensed' && (!action.input || action.input.city !== city || action.reviewer !== options.admittedReviewer ||
         Date.parse(action.input.timeWindow.start) <= Date.now() || Date.parse(options.retention.expiresAt) <= Date.now())) throw new Error('licensed invocation unavailable');
     const request = await signRequest({ kind: 'request', version: '0.1',
@@ -296,11 +313,8 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
       profileBasis: { blockNumber: source.blockNumber, blockHash: source.blockHash.toLowerCase(), agentOwner: source.agentOwner.toLowerCase(),
         agentUriDigest: source.agentUriDigest.toLowerCase(), registrationDigest: source.registrationDigest.toLowerCase(),
         cardDigest: source.cardDigest.toLowerCase(), receiptSigner: profile.registration['x-nandacity'].receiptSigner.toLowerCase() },
-      input: options.mode === 'licensed' ? action.input! : { version: '0.1', capability: 'evening-plan', city,
-        timeWindow: { start: city === 'Chicago' ? '2026-10-02T18:00:00-05:00' : '2026-10-02T18:00:00-04:00',
-          end: city === 'Chicago' ? '2026-10-02T22:00:00-05:00' : '2026-10-02T22:00:00-04:00', timeZone: city === 'Chicago' ? 'America/Chicago' : 'America/New_York' },
-        area: city === 'Chicago' ? 'The Loop' : 'Back Bay', budget: { currency: 'USD', minorUnits: '8500' },
-        transport: ['walk', 'public-transit'], preferences: [action.fail ? 'Trigger provider fault' : 'Interactive fixture example'] } }, caller);
+      input: options.mode === 'licensed' ? action.input! : options.answerEngine === 'openclaw' && action.input && !action.fail ? action.input :
+        { ...demoEveningInput(city), preferences: [action.fail ? 'Trigger provider fault' : 'Interactive fixture example'] } }, caller);
     const params = { message: { kind: 'message', role: 'user', messageId: randomUUID(), parts: [{ kind: 'data',
       data: { type: CITY_REQUEST_DATA_TYPE, version: '0.1', envelope: request } }] }, configuration: { blocking: false, acceptedOutputModes: ['application/json'] } };
     const entry: PrivateInvocation = { view: { id, service: chosen.service, reviewer: action.reviewer,
@@ -441,7 +455,7 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
     },
     start: (input, id = randomUUID()) => {
       requireFixture(); if (!operationIdSchema.safeParse(id).success) throw new Error('invalid operation identity');
-      const action = (mode === 'licensed' ? licensedActionSchema : fixtureActionSchema).parse(input) as SessionAction;
+      const action = (mode === 'licensed' ? licensedActionSchema : options.mode !== 'licensed' && options.answerEngine === 'openclaw' ? openclawActionSchema : fixtureActionSchema).parse(input) as SessionAction;
       const encoded = JSON.stringify(action), old = operations.get(id);
       if (old) { if (old.action !== encoded) throw new Error('operation identity conflict'); return structuredClone(old.view); }
       if (options.mode === 'licensed' && action.kind === 'invoke' && (action.reviewer !== options.admittedReviewer ||

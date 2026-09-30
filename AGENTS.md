@@ -82,6 +82,12 @@ ranking and generated-credential account/recovery demonstrations:
   byte copies; saved session exports contain receipts, never licensed answers or
   private request/card bytes. The fixture launcher supplies no model adapter,
   external credentials or owner-approved source permissions; and
+- an explicitly selected, preflight-gated OpenClaw gateway CLI adapter for the
+  dedicated isolated roster: bounded single-session model dispatch, configuration-
+  disabled tools, cancellation signalling and post-dispatch reported usage.
+  Model opinion selects an authored fictional plan; signing/authority inputs stay
+  outside the prompt. No automatic fixture fallback or live-source utility claim;
+  [video rehearsal](docs/video-demo.md) is opt-in and never part of CI; and
 - explicit owned session actions for the synthetic HTTPS-origin comparison and
   same-host fresh-process raw-evidence ranking reconstruction, with cancellation;
   the card host and local RPC remain required, not offline verification; and
@@ -133,7 +139,7 @@ not a durable authority source; do not claim that later parties can independentl
 re-read chain history from the export alone.
 The comparison and ranking consumers share the same test host and owned
 chain; they do not prove independent operator custody, live city facts, or
-semantic quality. A public-chain ranking service, real source/model utility and
+semantic quality. A public-chain ranking service, real source-backed model utility and
 operator-separated evidence adapters remain unbuilt.
 Local feedback publication alone is not independent canonical read-back, document
 availability, historical signature ordering, service quality, or Index retention.

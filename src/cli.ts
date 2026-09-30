@@ -11,6 +11,7 @@ import { runExternalClientDemo } from './demo/externalClientJourney.js';
 import { runFeedbackRetentionDemo } from './demo/feedbackRetention.js';
 import { runDoctor } from './demo/doctor.js';
 import { runSessionDemo } from './demo/sessionServer.js';
+import { prepareOpenClawExecutorFactory } from './demo/openclaw.js';
 
 const usage = 'Usage: npm run demo:identity -- [--json]';
 const discoveryUsage = 'Usage: npm run demo:discovery -- --index-checkout /absolute/path [--json]';
@@ -62,15 +63,16 @@ export async function runCli(
     output.write(`Fixture launch: ${result.fixtureReady ? 'ready' : 'not ready'}. Full-check prerequisites: ${result.fullCheckReady ? 'ready' : 'not ready'}. No tests or Town admission have been run.\n`);
     return result.fixtureReady ? 0 : 1;
   }
-  if (args[0] === 'session' && args[1] === 'demo') {
+  if (args[0] === 'session' && (args[1] === 'demo' || args[1] === 'openclaw')) {
     const checkout = args[3], port = args.length === 6 ? Number(args[5]) : 0;
     if ((args.length !== 4 && args.length !== 6) || args[2] !== '--index-checkout' || !checkout || !isAbsolute(checkout) ||
         (args.length === 6 && (args[4] !== '--port' || !/^[0-9]{1,5}$/.test(args[5]!) || port < 1 || port > 65535))) {
-      errorOutput.write('Usage: npm run demo:session -- --index-checkout /absolute/path [--port 3000]\n'); return 2;
+      errorOutput.write('Usage: npm run demo:session (or demo:openclaw) -- --index-checkout /absolute/path [--port 3000]\n'); return 2;
     }
     const result = await runDoctor({ ...process.env, NANDA_INDEX_CHECKOUT: checkout });
     if (!result.fixtureReady) { for (const check of result.checks.filter((c) => c.requiredFor === 'fixture' && !c.ok)) errorOutput.write(`${check.id}: ${check.guidance}\n`); return 1; }
-    try { await runSessionDemo(checkout, output, port); return 0; }
+    try { await runSessionDemo(checkout, output, port, args[1] === 'openclaw' ? {
+      answerEngine: 'openclaw', executionTimeoutMs: 60000, executor: await prepareOpenClawExecutorFactory() } : {}); return 0; }
     catch { errorOutput.write('Local session stopped or unavailable; no live-provider or public-chain success claim.\n'); return 1; }
   }
   if (args[0] === 'feedback' && args[1] === 'demo') {

@@ -4,6 +4,22 @@ import type { SessionView } from '../../src/demo/sessionController.js';
 import { renderSessionView } from '../../src/report/sessionView.js';
 import { syntheticEveningPlan } from '../../src/a2a/answer.js';
 
+test('OpenClaw rehearsal clearly separates real model choice from authored city facts and escapes opinions', () => {
+  const view = emptyView(); view.answerEngine = 'openclaw';
+  view.invocations = [{ id: 'ai', service: 'service-7', reviewer: 'accepted', requestDigest: `0x${'a'.repeat(64)}`,
+    sent: true, accepted: true, taskId: 'task', outcome: 'completed', checkedResult: 'matched', answer: JSON.stringify({
+      kind: 'synthetic-evening-plan', rationale: 'Authored option', schedule: [{ role: 'dinner', place: 'Fictional dinner', detail: 'Demo' }, { role: 'activity', place: 'Fictional activity', detail: 'Demo' }],
+      route: { from: 'Dinner', to: 'Activity', mode: 'walk', detail: 'Conceptual route' },
+      budget: { currency: 'USD', requestedMinorUnits: '8500', allocations: { dinner: 2100, activity: 0, transport: 0 }, estimatedTotalMinorUnits: 2100 },
+      sources: [], unmetConstraints: ['Not live checked'], retrievalAsOf: 'fixture',
+      modelSynthesis: { text: '<script>bad()</script>', tradeoffs: ['Simple dinner'], uncertainties: ['Hours unknown'], specialist: 'food',
+        provider: 'openai', model: 'gpt-6-luna', usage: { input: 7500, output: 120, cacheRead: 0, total: 7620 } } }) }];
+  const html = renderSessionView(view, active);
+  assert.match(html, /Real OpenClaw reasoning/); assert.match(html, /Model opinion/);
+  assert.match(html, /Authored fixture/); assert.match(html, /reported after dispatch/);
+  assert.match(html, /&lt;script&gt;bad/); assert.equal(html.includes('<script>bad'), false);
+});
+
 export function emptyView(): SessionView {
   return { mode: 'fixture', generation: 0, status: 'ready', lifecycleOperationId: 'life', operators: [],
     crossOperatorWrite: 'not-tested', invocations: [], discovery: null, selection: null, operations: [], feedback: [],

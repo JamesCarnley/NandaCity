@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { liveAnswerSchema } from '../live/answer.js';
 import { eveningPlanInputSchema } from '../a2a/input.js';
 import { renderSessionView, type SessionRenderOptions } from '../report/sessionView.js';
-import { withDemoSession, type DemoSession, type SessionAction } from './sessionController.js';
+import { demoEveningInput, withDemoSession, type DemoSession, type SessionAction, type SessionOptions } from './sessionController.js';
 import { withOwnedLifecycle } from './ownedLifecycle.js';
 
 const MAX_BODY = 16 * 1024;
@@ -126,8 +126,19 @@ export async function startSessionServer(session: DemoSession, port = 0): Promis
               if (!input.success || Date.parse(input.data.timeWindow.start) <= Date.now()) throw new HttpFailure(400);
               action = { kind: 'invoke', reviewer: value.reviewer, input: input.data };
             } else {
-              if (['start', 'end', 'area', 'budget', 'transport', 'preferences'].some((key) => Object.hasOwn(value, key))) throw new HttpFailure(400);
-              action = { kind: 'invoke', reviewer: value.reviewer, ...(value.action === 'invoke-failure' ? { fail: true } : {}) };
+              if (view.answerEngine === 'openclaw' && value.action === 'invoke') {
+                if (['start', 'end', 'area'].some((key) => Object.hasOwn(value, key)) || !view.discovery) throw new HttpFailure(400);
+                const base = demoEveningInput(view.discovery.city);
+                const input = eveningPlanInputSchema.safeParse({ ...base,
+                  budget: { currency: 'USD', minorUnits: value.budget ?? base.budget.minorUnits },
+                  transport: value.transport === undefined ? base.transport : value.transport === 'walk-and-public-transit' ? ['walk', 'public-transit'] : [value.transport],
+                  preferences: value.preferences?.split(/\r?\n/).filter(Boolean) ?? base.preferences });
+                if (!input.success) throw new HttpFailure(400);
+                action = { kind: 'invoke', reviewer: value.reviewer, input: input.data };
+              } else {
+                if (['start', 'end', 'area', 'budget', 'transport', 'preferences'].some((key) => Object.hasOwn(value, key))) throw new HttpFailure(400);
+                action = { kind: 'invoke', reviewer: value.reviewer, ...(value.action === 'invoke-failure' ? { fail: true } : {}) };
+              }
             }
           } else {
             const { token: _token, operationId: _id, generation: _generation, action: kind, ...fields } = value;
@@ -152,13 +163,13 @@ export async function startSessionServer(session: DemoSession, port = 0): Promis
   return { origin, close: () => closed ??= new Promise<void>((resolve, reject) => { server.close((error) => error ? reject(error) : resolve()); server.closeAllConnections(); }) };
 }
 
-export async function runSessionDemo(indexCheckout: string, output: Pick<NodeJS.WriteStream, 'write'>, port = 0): Promise<void> {
+export async function runSessionDemo(indexCheckout: string, output: Pick<NodeJS.WriteStream, 'write'>, port = 0, options: SessionOptions = {}): Promise<void> {
   await withOwnedLifecycle(async (lifecycle) => withDemoSession(indexCheckout, async (session) => {
     const server = await startSessionServer(session, port);
-    output.write(`NANDA City fixture: ${server.origin}\nPreparing owned local resources. Ctrl-C closes the session and awaits cleanup.\n`);
+    output.write(`NANDA City ${options.mode !== 'licensed' && options.answerEngine === 'openclaw' ? 'OpenClaw rehearsal (fictional data)' : 'fixture'}: ${server.origin}\nPreparing owned local resources. Ctrl-C closes the session and awaits cleanup.\n`);
     try {
       await new Promise<void>((resolve) => { const stop = () => resolve();
         lifecycle.signal.addEventListener('abort', stop, { once: true }); if (lifecycle.signal.aborted) stop(); });
     } finally { await server.close(); }
-  }));
+  }, options));
 }

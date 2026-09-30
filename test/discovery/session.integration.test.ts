@@ -35,6 +35,36 @@ async function consumer(input: unknown) {
   });
 }
 
+test('OpenClaw-shaped execution preserves requested inputs, signed evidence, longer bounded execution and feedback', { timeout: 240000 }, async () => {
+  const { withDemoSession, demoEveningInput } = await import('../../src/demo/sessionController.js');
+  const { composeSpecialistAnswer } = await import('../../src/demo/openclaw.js');
+  let received: unknown;
+  await withDemoSession(process.env.NANDA_INDEX_CHECKOUT!, async (session) => {
+    await session.ready(); assert.equal(session.view().answerEngine, 'openclaw');
+    assert.equal((await session.wait(session.start({ kind: 'refresh', city: 'Boston' }, 'ai-discovery').id)).state, 'completed');
+    session.select(session.view().discovery!.selected[0]!.service);
+    const input = { ...demoEveningInput('Boston'), budget: { currency: 'USD' as const, minorUnits: '4000' }, preferences: ['Low cost'] };
+    const operation = await session.wait(session.start({ kind: 'invoke', reviewer: 'accepted', input }, 'ai-evening').id);
+    assert.equal(operation.state, 'completed'); assert.deepEqual(received, input);
+    const invocation = session.view().invocations[0]!;
+    assert.equal(invocation.outcome, 'completed'); assert.equal(invocation.checkedResult, 'matched');
+    const answer = JSON.parse(invocation.answer!); assert.equal(answer.budget.estimatedTotalMinorUnits, 2200);
+    assert.equal(answer.modelSynthesis.text, 'The lower-cost option leaves room in the example budget.');
+    assert.equal((await session.wait(session.start({ kind: 'feedback', invocationId: 'ai-evening', value: 5 }, 'ai-rating').id)).state, 'completed');
+    assert.equal(session.view().feedback[0]!.readBack, 'matched'); assert.equal(session.view().feedback[0]!.weighting, 'contributing');
+  }, { answerEngine: 'openclaw', executionTimeoutMs: 60000, executor: ({ emphasis }) => async (request, context) => {
+    received = request.input;
+    await new Promise<void>((resolve, reject) => { const stop = () => { clearTimeout(timer); reject(new Error('aborted')); };
+      const timer = setTimeout(() => { context.signal.removeEventListener('abort', stop); resolve(); }, 5500);
+      context.signal.addEventListener('abort', stop, { once: true }); });
+    return composeSpecialistAnswer(request.input, emphasis, JSON.stringify({ status: 'ok', summary: 'completed',
+      result: { payloads: [{ text: JSON.stringify({ choice: 'travel-value', summary: 'The lower-cost option leaves room in the example budget.',
+        tradeoffs: ['Self-guided activity.'], uncertainties: ['Not live checked.'] }) }], meta: { aborted: false, stopReason: 'stop',
+        agentMeta: { provider: 'openai', model: 'gpt-6-luna', usage: { input: 7500, output: 120, cacheRead: 0, total: 7620 },
+          terminalReceipt: { successfulToolNames: [], rerouted: false } } } } }));
+  } });
+});
+
 test('owned interactive session initializes three separated Safe operators without sending work', { timeout: 240000 }, async (t) => {
   const module = await import('../../src/demo/sessionController.js').catch(() => undefined);
   assert.ok(module?.withDemoSession, 'owned headless session capability must exist');

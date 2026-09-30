@@ -89,6 +89,31 @@ test('licensed HTTP form preserves the allowlisted walking plus transit choice',
   } finally { await server.close(); }
 });
 
+test('OpenClaw form validates demo preferences and budget without accepting credentials or live configuration', async () => {
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  const view = state(); view.answerEngine = 'openclaw';
+  view.discovery = { city: 'Boston', status: 'complete', eligibleCount: 0, selected: [],
+    ranking: { policyResult: null, snapshot: 'matched' }, observation: { blockNumber: '1', blockHash: '0x00' } } as unknown as SessionView['discovery'];
+  const actions: SessionAction[] = [];
+  const session: DemoSession = { view: () => view, readContent: () => undefined, ready: async () => {}, select: () => {},
+    wait: async () => { throw new Error(); }, frozenInput: () => { throw new Error(); }, reset: async () => {}, close: async () => {},
+    start: (action, id = 'id') => { actions.push(action); return { id, generation: 0, kind: action.kind, state: 'queued' }; } };
+  const server = await startSessionServer(session);
+  try {
+    const page = await (await fetch(server.origin)).text(), token = /name="token" value="([^"]+)"/.exec(page)![1]!;
+    const form = new URLSearchParams({ token, generation: '0', operationId: 'model', action: 'invoke', reviewer: 'accepted',
+      budget: '4000', transport: 'walk', preferences: 'Low cost\nAn activity' }).toString();
+    const post = (body: string) => fetch(`${server.origin}/action`, { method: 'POST', redirect: 'manual',
+      headers: { origin: server.origin, 'content-type': 'application/x-www-form-urlencoded' }, body });
+    for (const body of [form + '&apiKey=secret', form + '&area=unexpected', form.replace('budget=4000', 'budget=-1'),
+      form.replace('transport=walk', 'transport=fly'), form.replace('Low+cost', 'x'.repeat(257))]) assert.equal((await post(body)).status, 400);
+    assert.equal(actions.length, 0); assert.equal((await post(form)).status, 303);
+    const action = actions[0]!; assert.ok(action.kind === 'invoke' && action.input);
+    assert.equal(action.input.city, 'Boston'); assert.equal(action.input.budget.minorUnits, '4000');
+    assert.deepEqual(action.input.transport, ['walk']); assert.deepEqual(action.input.preferences, ['Low cost', 'An activity']);
+  } finally { await server.close(); }
+});
+
 test('authenticated reset stays reachable and coalesces at the normal submission cap', async () => {
   const { startSessionServer } = await import('../../src/demo/sessionServer.js');
   const view = state(), cleanup = Promise.withResolvers<void>(); let starts = 0, resets = 0;
