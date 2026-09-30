@@ -12,6 +12,10 @@ operator-published records, sends a signed A2A request, and receives signed
 acceptance and completion. Its feedback is tied to that interaction and can
 inform another client's selection under an explicit reviewer policy.
 
+The Index is the search service. An AgentCard describes how to contact and use
+a specialist; A2A is the protocol carrying the task. Here, Ethereum's ERC-8004
+contracts provide operator-controlled identities and shared feedback commitments.
+
 ```text
 Find specialists     Verify the operator     Ask and receive     Review and choose
 Two NANDA Indexes →  ERC-8004 + AgentCard →  Signed A2A journey → Explained ranking

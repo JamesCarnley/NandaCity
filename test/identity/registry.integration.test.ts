@@ -84,7 +84,8 @@ test('owned registry exact URI bytes reject a normalized discovery substitute',
 test('deploys the pinned local Reputation proxy linked to the selected Identity Registry', async () => {
   await withOwnedAnvil(async (rpcUrl) => {
     const transport = http(rpcUrl, { retryCount: 0, timeout: 5_000 });
-    const client = createPublicClient({ transport, pollingInterval: 50 });
+    // No-write assertions need fresh heads, not a receipt poller's cached block.
+    const client = createPublicClient({ transport, pollingInterval: 50, cacheTime: 0 });
     const testClient = createTestClient({ mode: 'anvil', transport });
     const account = privateKeyToAccount(generatePrivateKey());
     await testClient.setBalance({ address: account.address, value: parseEther('100') });

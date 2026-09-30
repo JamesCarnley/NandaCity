@@ -40,6 +40,8 @@ wallet material or the OpenClaw administration screen.
    Show the score and its evidence. This disclosed demo reviewer is admitted by
    the selection policy; a new reviewer can publish but does not automatically
    acquire ranking influence. No positive review approval is granted to the seller.
+   A single 5/5 review displays a 3.67/5 policy score: this policy pulls small
+   samples toward a neutral starting point rather than awarding instant perfection.
 4. **Remove the middleman.** Expand resilience, stop Index A, then compare.
    Index B still discovers authentic services. Recover A, tamper with it, stop B,
    and compare again: altered records are rejected, not treated as operator truth.
@@ -53,6 +55,12 @@ Optional closing: select Boston; show the deliberate signed failure (injected
 before inference, not a failed model call); or run the
 explicit chain-free comparison. Reset rebuilds the local fixture and waits for
 its owned cleanup. It does not erase OpenClaw history or refill the model allowance.
+
+For a short video, lead with the working journey, then the two Index failure
+controls and identity recovery. Show exact evidence only when explaining one
+claim; the full JSON is available without making it the main presentation.
+Model calls and recovery can take several seconds. Wait for the operation to
+complete before the next click; do not reset just because a button is disabled.
 
 ## What is real, and what is simulated?
 
