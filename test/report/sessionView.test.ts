@@ -25,7 +25,8 @@ test('OpenClaw rehearsal clearly separates real model choice from authored city 
 export function emptyView(): SessionView {
   return { mode: 'fixture', generation: 0, status: 'ready', lifecycleOperationId: 'life', operators: [],
     crossOperatorWrite: 'not-tested', invocations: [], discovery: null, selection: null, operations: [], feedback: [],
-    freshConsumer: null, originComparison: null, feedbackCapacity: { total: 16, used: 0, exhausted: false }, limitations: [] };
+    freshConsumer: null, originComparison: null, indexControls: { A: 'online', B: 'online' }, indexRead: null, experiment: null,
+    feedbackCapacity: { total: 16, used: 0, exhausted: false }, limitations: [] };
 }
 test('session page tells a safe story and saved exports omit active forms and tokens', async () => {
   const api = await import('../../src/report/sessionView.js').catch(() => undefined);
@@ -50,6 +51,129 @@ function discoveredView(snapshot: 'unavailable' | 'changed'): SessionView {
 }
 const active = { token: 'test-token', nonce: 'test-nonce' };
 const actionForm = (html: string, action: string) => html.match(/<form\b[^]*?<\/form>/g)?.find((form) => form.includes(`name="action" value="${action}"`));
+
+test('completed request leads with the answer and keeps the editable brief behind Ask again', () => {
+  const view = discoveredView('unavailable'); view.selection = 'service-7';
+  view.invocations = [{ id: 'reply-one', service: 'service-7', reviewer: 'accepted', requestDigest: `0x${'a'.repeat(64)}`,
+    sent: true, accepted: true, taskId: 'task', outcome: 'failed', checkedResult: 'matched', answer: null }];
+  const html = renderSessionView(view, active);
+  const ask = html.slice(html.indexOf('<section class="task-panel" id="ask"'), html.indexOf('<section class="task-panel" id="review"'));
+  assert.ok(ask.indexOf('Your fixture request') < ask.indexOf('Your evening brief'));
+  assert.match(ask, /data-disclosure-key="ask-again"><summary>Ask again or change brief<\/summary>/);
+  assert.match(actionForm(ask, 'invoke')!, /name="panel" value="ask"/);
+});
+
+test('published review leads with its observed effect and keeps another rating available', () => {
+  const view = emptyView();
+  view.invocations = [{ id: 'reply-one', service: 'service-7', reviewer: 'accepted', requestDigest: `0x${'a'.repeat(64)}`,
+    sent: true, accepted: true, taskId: 'task', outcome: 'completed', checkedResult: 'matched', answer: null }];
+  view.feedback = [{ id: 'feedback-one', invocationId: 'reply-one', value: 5, reviewer: 'accepted', slot: 0,
+    documentHash: `0x${'b'.repeat(64)}`, signed: true, publication: 'observed', transactionHash: null,
+    readBack: 'matched', retained: { A: true, B: true }, weighting: 'contributing', policyId: 'session-demo-reviewer-policy' }];
+  const html = renderSessionView(view, active);
+  const review = html.slice(html.indexOf('<section class="task-panel" id="review"'), html.indexOf('<section class="task-panel" id="resilience"'));
+  assert.ok(review.indexOf('feedback-card') < review.indexOf('review-action'));
+  assert.match(review, /This review counts toward your policy score/);
+  assert.match(review, /data-disclosure-key="review-actions"><summary>Rate another interaction<\/summary>/);
+});
+
+test('pending feedback does not claim the ranking refresh has already happened', () => {
+  const view = emptyView();
+  view.feedback = [{ id: 'pending', invocationId: 'reply-one', value: 5, reviewer: 'accepted', slot: 0,
+    documentHash: `0x${'c'.repeat(64)}`, signed: true, publication: 'not-prepared', transactionHash: null,
+    readBack: 'not-read', retained: { A: false, B: false }, weighting: 'not-assessed-at-this-observation', policyId: 'session-demo-reviewer-policy' }];
+  const html = renderSessionView(view, active);
+  assert.equal(html.includes('The ranking was refreshed after publication.'), false);
+  assert.match(html, /A successful publication is followed by a fresh ranking check/);
+});
+
+test('recovery check tells the actual observed endpoint and stable city IDs', () => {
+  const view = discoveredView('unavailable');
+  view.operators[0]!.services.push({ city: 'Boston', agentId: '8', status: 'ready' });
+  view.recoveryCheck = { operatorId: 'operator-1', city: 'Chicago', status: 'observed',
+    endpoint: 'http://127.0.0.1:8123/migrated', reason: 'Fresh endpoint checked.' };
+  const html = renderSessionView(view, active);
+  const ownership = html.slice(html.indexOf('<section class="task-panel" id="ownership"'));
+  assert.match(ownership, /Fresh endpoint checked/);
+  assert.match(ownership, /http:\/\/127\.0\.0\.1:8123\/migrated/);
+  assert.match(ownership, /Chicago service #7[^]*?Boston service #8/);
+  view.operations = [{ id: 'recover', generation: 0, kind: 'recover', state: 'completed' }];
+  assert.match(renderSessionView(view, active), /Recovery checked[^]*?Chicago service #7, Boston service #8/);
+});
+
+test('network workspace keeps node state and experiment result adjacent to native controls', () => {
+  const view = discoveredView('unavailable');
+  view.indexControls.A = 'offline';
+  view.indexRead = { city: 'Chicago', status: 'partial', indexes: {
+    A: { status: 'unavailable', verified: 0, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] },
+    B: { status: 'complete', verified: 3, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] } }, services: ['s1', 's2', 's3'] };
+  view.operations = [{ id: 'stop-a', generation: 0, kind: 'index', state: 'completed' }];
+  view.discovery = { ...view.discovery!, status: 'partial', selected: [{ ...view.discovery!.selected[0]!, origins: ['http://b.test'] }] };
+  view.experiment = { target: 'A', action: 'stop', city: 'Chicago', phase: 'observed', note: 'Compared the same city.',
+    before: { city: 'Chicago', status: 'complete', indexes: {
+      A: { status: 'complete', verified: 3, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] },
+      B: { status: 'complete', verified: 3, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] } }, services: ['s1', 's2', 's3'] },
+    after: { city: 'Chicago', status: 'partial', indexes: {
+      A: { status: 'unavailable', verified: 0, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] },
+      B: { status: 'complete', verified: 3, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] } }, services: ['s1', 's2', 's3'] } };
+  const html = renderSessionView(view, active);
+  assert.match(html, /class="network-stage"/);
+  assert.match(html, /class="inspector"/);
+  assert.match(html, /href="#resilience"[^>]*>Experiments/);
+  assert.match(html, /href="#ownership"[^>]*>Ownership/);
+  assert.match(html, /Index A[^]*?offline[^]*?Index B/);
+  assert.match(html, /data-route-index="A" data-route-state="unavailable"/);
+  assert.match(html, /data-route-index="B" data-route-state="verified"/);
+  assert.match(html, /A: 3 verified → 0 verified/);
+  assert.match(html, /B: 3 verified → 3 verified/);
+  assert.match(html, /3 remaining unique services/);
+  assert.match(html, /Exact remaining service IDs[^]*?<code>s1<\/code> · <code>s2<\/code> · <code>s3<\/code>/);
+  assert.match(html, /class="stage-status[^>]*" role="status"><strong>[^<]*<\/strong><span>[^<]*3 remaining unique services/);
+  assert.match(html, /No service was invoked by this discovery-only experiment/);
+  assert.match(actionForm(html, 'index')!, /name="city" value="Chicago"/);
+  assert.match(actionForm(html, 'index')!, /name="panel" value="resilience"/);
+});
+
+test('experiment names a retained operator compactly and keeps its full service key in evidence', () => {
+  const view = discoveredView('unavailable');
+  const full = `eip155:31337/erc721:0x${'1'.repeat(40)}/7`;
+  view.discovery = { ...view.discovery!, selected: [{ ...view.discovery!.selected[0]!, service: full }] };
+  view.experiment = { target: 'A', action: 'stop', city: 'Chicago', phase: 'observed', before: null, note: 'Observed.',
+    after: { city: 'Chicago', status: 'partial', services: [full], indexes: {
+      A: { status: 'unavailable', verified: 0, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] },
+      B: { status: 'complete', verified: 1, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] } } } };
+  const html = renderSessionView(view, active);
+  const result = html.slice(html.indexOf('class="experiment-result"'), html.indexOf('class="experiment-controls"'));
+  assert.match(result, /Remaining services: Food first · Chicago #7/);
+  assert.match(result, /<summary>Exact remaining service IDs<\/summary>[^]*?eip155:31337\/erc721:/);
+  assert.equal(result.includes(`<p class="remaining-ids">Remaining service IDs: <code>${full}</code>`), false);
+});
+
+test('zero verified services does not claim both Indexes are down when one answered', () => {
+  const view = emptyView();
+  view.experiment = { target: 'A', action: 'tamper', city: 'Chicago', phase: 'observed', before: null, note: 'Observed.',
+    after: { city: 'Chicago', status: 'partial', services: [], indexes: {
+      A: { status: 'partial', verified: 0, rejected: 1, unavailable: 0, alteredNames: [], reasons: ['owner mismatch'] },
+      B: { status: 'complete', verified: 0, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] } } } };
+  const html = renderSessionView(view, active);
+  assert.match(html, /No verified services were returned in this comparison/);
+  assert.equal(html.includes('Both Indexes were unavailable; no verified services were returned.'), false);
+});
+
+test('tamper and no-prior experiments state only observed rejection and unknown comparison', () => {
+  const view = emptyView(); view.indexControls.A = 'altered';
+  view.experiment = { target: 'A', action: 'tamper', city: 'Boston', phase: 'observed', before: null,
+    note: 'No prior comparison for this city.', after: { city: 'Boston', status: 'partial', indexes: {
+      A: { status: 'partial', verified: 2, rejected: 1, unavailable: 0, alteredNames: ['Tampered unverified name'], reasons: ['declaration differs from owner record'] },
+      B: { status: 'complete', verified: 3, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] } }, services: ['s1', 's2', 's3'] } };
+  const html = renderSessionView(view, active);
+  assert.match(html, /No prior comparison for Boston/);
+  assert.match(html, /Tampered unverified name/);
+  assert.match(html, /1 rejected/);
+  assert.match(html, /declaration differs from owner record/);
+  assert.match(html, /B[^]*?3 verified/);
+  assert.match(html, /Authentic owner record/);
+});
 
 for (const snapshot of ['unavailable', 'changed'] as const) test(`verified discovery with ${snapshot} ranking is not absent and cannot invite invocation`, () => {
   const view = discoveredView(snapshot);
@@ -254,22 +378,25 @@ test('hostile operation error is escaped and cannot enter inline script', () => 
 });
 
 test('a status poll begun before selection cannot replace the submitted selection with an older page', async () => {
-  type FakeMain = { dataset: { generation: string; city: string; selection: string }; querySelectorAll(selector: string): unknown[]; replaceWith(next: FakeMain): void };
+  type FakeMain = { dataset: { generation: string; city: string; selection: string; panel?: string }; panelScroll: { scrollTop: number };
+    querySelectorAll(selector: string): unknown[]; querySelector(selector: string): unknown; replaceWith(next: FakeMain): void };
   let current: FakeMain;
   const main = (selection: string): FakeMain => ({ dataset: { generation: '0', city: 'Chicago', selection },
-    querySelectorAll: () => [], replaceWith(next) { current = next; } });
+    panelScroll: { scrollTop: 360 }, querySelectorAll: () => [], querySelector(selector) { return selector === '.panel-scroll' ? this.panelScroll : null; },
+    replaceWith(next) { current = next; } });
   current = main('');
   let resolveStatus!: (response: unknown) => void;
   const delayedStatus = new Promise((resolve) => { resolveStatus = resolve; });
   const listeners = new Map<string, (event: unknown) => Promise<void>>();
   const intervals: (() => Promise<void>)[] = [];
   let pageFetches = 0;
-  class FakeForm { getAttribute(name: string) { return name === 'action' ? '/action' : null; } querySelectorAll() { return []; } }
+  class FakeForm { getAttribute(name: string) { return name === 'action' ? '/action' : null; }
+    querySelectorAll() { return []; } querySelector() { return { value: 'discover' }; } }
   class FakeFormData { constructor(_form: FakeForm) {} *[Symbol.iterator](): Generator<[string, string]> {} }
   const document = { hidden: false, activeElement: null, querySelector: (selector: string) => selector === 'main' ? current : null,
     querySelectorAll: () => [], addEventListener: (event: string, handler: (event: unknown) => Promise<void>) => { listeners.set(event, handler); } };
   const window = { __cityInitialStatus: { generation: 0, status: 'ready', operations: [] }, scrollY: 0,
-    fetch: true, addEventListener() {}, scrollTo() {} };
+    fetch: true, addEventListener() {}, scrollTo() {}, history: { replaceState() {} } };
   const fetch = async (path: string) => {
     if (path === '/status') return delayedStatus;
     if (path === '/') { pageFetches++; return { ok: true, text: async () => 'stale' }; }
@@ -282,10 +409,45 @@ test('a status poll begun before selection cannot replace the submitted selectio
   const pendingPoll = intervals[0]!();
   await listeners.get('submit')!({ target: new FakeForm(), submitter: { disabled: false }, preventDefault() {} });
   assert.equal(current.dataset.selection, 'service-7');
+  assert.equal(current.panelScroll.scrollTop, 0, 'an explicit same-panel action should reveal its result above the control');
   resolveStatus({ ok: true, json: async () => ({ generation: 0, status: 'ready', operations: [{ id: 'older', state: 'completed' }] }) });
   await pendingPoll;
   assert.equal(current.dataset.selection, 'service-7', 'a response begun before submit must not overwrite the newer selection');
   assert.equal(pageFetches, 0, 'stale status must not trigger a page fetch or acknowledge its revision');
+});
+
+for (const focused of ['tab', 'summary'] as const) test(`polling preserves keyboard focus on a ${focused}`, async () => {
+  let current: any;
+  const document: any = { hidden: false, activeElement: null, querySelectorAll: () => [], addEventListener() {} };
+  const makeMain = () => {
+    const panel = { id: 'discover' };
+    const details: any = { dataset: { disclosureKey: 'discovery-basis' }, open: true, querySelector: () => summary };
+    const tab: any = { dataset: { panelLink: 'discover', focusKey: 'tab:discover' },
+      setAttribute() {}, removeAttribute() {}, closest: () => null, focus: () => { document.activeElement = tab; } };
+    const summary: any = { dataset: {}, matches: (selector: string) => selector === 'summary',
+      closest: (selector: string) => selector.startsWith('details') ? details : selector === '.task-panel' ? panel : null,
+      focus: () => { document.activeElement = summary; } };
+    const main: any = { dataset: { generation: '0', city: 'Chicago', selection: '', panel: 'discover' }, tab, summary, details,
+      querySelectorAll: (selector: string) => selector === '.task-tabs [data-panel-link]' || selector === '[data-focus-key]' ? [tab] :
+        selector === 'details[data-disclosure-key]' ? [details] : [],
+      querySelector: () => null, replaceWith(next: any) { current = next; } };
+    return main;
+  };
+  current = makeMain(); document.activeElement = current[focused];
+  document.querySelector = (selector: string) => selector === 'main' ? current : null;
+  const intervals: (() => Promise<void>)[] = [];
+  const window = { __cityInitialStatus: { generation: 0, status: 'ready', operations: [] }, scrollY: 0,
+    addEventListener() {}, scrollTo() {} };
+  const fetch = async (path: string) => path === '/status'
+    ? { ok: true, json: async () => ({ generation: 0, status: 'ready', operations: [{ id: 'changed', state: 'completed' }] }) }
+    : { ok: true, text: async () => 'fresh page' };
+  runInNewContext(sessionClient, { document, window, fetch, URL,
+    DOMParser: class { parseFromString() { return { querySelector: () => makeMain() }; } },
+    location: { href: 'http://127.0.0.1:3000/#discover', hash: '#discover' },
+    setInterval: (callback: () => Promise<void>) => { intervals.push(callback); }, Date, Number, String, Event, Map });
+  await intervals[0]!();
+  assert.equal(document.activeElement, current[focused]);
+  if (focused === 'summary') assert.equal(current.details.open, true);
 });
 
 test('policy score display is bounded to two decimals while evidence preserves the exact fraction', () => {
@@ -326,6 +488,7 @@ for (const [city, emphasis, dinner, activity, travel, total] of [
   const html = renderSessionView(view, active), section = /<section class="answer">([^]*?)<\/section>/.exec(html)![1]!;
   const visible = section.replace(/<details>[^]*?<\/details>/g, '');
   assert.ok(visible.includes('<h5>Dinner · ')); assert.ok(visible.includes('<h5>Evening activity · '));
+  assert.match(section, /data-disclosure-key="authored:invocation"/);
   assert.ok(visible.includes('<h5>Getting there · ')); assert.ok(visible.includes('<h5>Example budget · USD</h5>'));
   assert.ok(visible.includes(`Dinner ${dinner} · activity ${activity} · travel ${travel}`));
   assert.ok(visible.includes(`Example total: ${total}. Requested budget: $85.00.`));

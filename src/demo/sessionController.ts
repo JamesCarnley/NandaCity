@@ -36,7 +36,7 @@ import { runFreshRankingConsumer } from '../client/rankingConsumerCli.js';
 
 export type SessionAction = { kind: 'refresh'; city: City } | { kind: 'invoke'; reviewer: 'accepted' | 'new'; fail?: boolean; input?: EveningPlanInput } |
   { kind: 'retry'; invocationId: string } | { kind: 'feedback'; invocationId: string; value: number } |
-  { kind: 'retry-feedback'; feedbackId: string } | { kind: 'index'; index: 'A' | 'B'; state: 'stop' | 'start' | 'restart' | 'tamper' } |
+  { kind: 'retry-feedback'; feedbackId: string } | { kind: 'index'; index: 'A' | 'B'; state: 'stop' | 'start' | 'restart' | 'tamper'; city?: City } |
   { kind: 'stop-providers' } | { kind: 'recover'; operatorId: string } | { kind: 'fresh-consumer' } | { kind: 'origin-comparison' };
 export type SessionOperation = { id: string; generation: number; kind: SessionAction['kind'];
   state: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; error?: string };
@@ -47,6 +47,16 @@ export type SessionFeedback = { id: string; invocationId: string; value: number;
   documentHash: Hex; signed: true; publication: 'not-prepared' | 'not-sent' | 'unresolved' | 'observed'; transactionHash: Hex | null;
   readBack: 'not-read' | 'matched' | 'mismatched' | 'orphaned' | 'unavailable'; retained: Record<'A' | 'B', boolean>;
   weighting: string; policyId: 'session-demo-reviewer-policy' };
+
+export type IndexObservation = { status: 'complete' | 'partial' | 'unavailable'; verified: number; rejected: number;
+  unavailable: number; alteredNames: string[]; reasons: string[] };
+export type ExperimentObservation = { city: City; status: RankedDiscoveryResult['status']; indexes: Record<'A' | 'B', IndexObservation>;
+  services: string[] };
+export type IndexExperiment = { target: 'A' | 'B'; action: 'stop' | 'start' | 'restart' | 'tamper'; city: City;
+  phase: 'applying' | 'discovering' | 'observed' | 'failed' | 'cancelled'; before: ExperimentObservation | null;
+  after: ExperimentObservation | null; note: string };
+export type RecoveryCheck = { operatorId: string; city: City | null; status: 'recovering' | 'checking' | 'observed' | 'unavailable' | 'cancelled';
+  endpoint: string | null; reason: string };
 
 export type SessionView = {
   mode: 'fixture' | 'licensed';
@@ -60,12 +70,14 @@ export type SessionView = {
   operators: { id: string; label: string; safe: string; services: { city: string; agentId: string; status: string }[]; recovery?: SessionRecovery }[];
   crossOperatorWrite: 'not-tested' | 'rejected'; invocations: SessionInvocation[];
   discovery: RankedDiscoveryResult | null; selection: string | null; operations: SessionOperation[];
+  indexControls: Record<'A' | 'B', 'online' | 'offline' | 'altered' | 'unknown'>;
+  indexRead: ExperimentObservation | null; experiment: IndexExperiment | null; recoveryCheck?: RecoveryCheck | null;
   feedback: SessionFeedback[]; feedbackCapacity: { total: number; used: number; exhausted: boolean };
   limitations: readonly string[];
 };
 export type DemoSession = { view(): SessionView; ready(): Promise<void>; select(service: string): void;
   start(action: SessionAction, operationId?: string): SessionOperation; wait(operationId: string): Promise<SessionOperation>;
-  /** Server-private raw configuration with explicitly supplied bundle paths; not a serialized verdict. */
+  /** Last completed raw observation for private replay after Index controls invalidate current discovery; recovery/reset destroy it. */
   frozenInput(): RankingEvidenceInput;
   /** Server-only disposable copy; never put content in public view or saved exports. */
   readContent(invocationId: string, generation: number): Uint8Array | undefined;
@@ -87,12 +99,27 @@ const optionsSchema = z.union([
       pricingExpiresAt: z.string(), now: callable.optional(), sleep: callable.optional() }) }),
 ]);
 const operationIdSchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
+function observeIndexes(discovery: RankedDiscoveryResult, origins: Record<'A' | 'B', string>): ExperimentObservation {
+  const indexes = Object.fromEntries((['A', 'B'] as const).map((name) => {
+    const origin = origins[name], observed = discovery.origins.find((item) => item.observerOrigin === origin);
+    const candidates = discovery.candidates.filter((item) => item.observerOrigin === origin);
+    return [name, { status: observed?.status ?? 'unavailable',
+      verified: candidates.filter((item) => item.status === 'verified').length,
+      rejected: candidates.filter((item) => item.status === 'rejected').length,
+      unavailable: candidates.filter((item) => item.status === 'unavailable').length,
+      alteredNames: [...new Set(candidates.filter((item) => item.status === 'rejected' && item.observedName)
+        .map((item) => item.observedName!))],
+      reasons: [...new Set(candidates.filter((item) => item.status !== 'verified').map((item) => item.reason))] }];
+  })) as Record<'A' | 'B', IndexObservation>;
+  return { city: discovery.city, status: discovery.status, indexes, services: discovery.selected.map((item) => item.service) };
+}
 const otherActions = [
   z.strictObject({ kind: z.literal('refresh'), city: z.enum(['Chicago', 'Boston']) }),
   z.strictObject({ kind: z.literal('retry'), invocationId: operationIdSchema }),
   z.strictObject({ kind: z.literal('feedback'), invocationId: operationIdSchema, value: z.number().int().min(1).max(5) }),
   z.strictObject({ kind: z.literal('retry-feedback'), feedbackId: operationIdSchema }),
-  z.strictObject({ kind: z.literal('index'), index: z.enum(['A', 'B']), state: z.enum(['stop', 'start', 'restart', 'tamper']) }),
+  z.strictObject({ kind: z.literal('index'), index: z.enum(['A', 'B']), state: z.enum(['stop', 'start', 'restart', 'tamper']),
+    city: z.enum(['Chicago', 'Boston']).optional() }),
   z.strictObject({ kind: z.literal('stop-providers') }),
   z.strictObject({ kind: z.literal('fresh-consumer') }),
   z.strictObject({ kind: z.literal('origin-comparison') }),
@@ -142,7 +169,8 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
   let runInOwnedScope: ReturnType<typeof AsyncLocalStorage.snapshot>;
   const initial = (): SessionView => ({ mode, ...(options.mode !== 'licensed' && options.answerEngine ? { answerEngine: options.answerEngine } : {}), ...(options.mode === 'licensed' ? { licensedHint: { admittedReviewer: options.admittedReviewer, expiresAt: options.retention.expiresAt } } : {}),
     freshConsumer: null, originComparison: null, generation, status: 'starting', lifecycleOperationId: randomUUID(), operators: [], crossOperatorWrite: 'not-tested',
-    invocations: [], discovery: null, selection: null, operations: [], feedback: [],
+    invocations: [], discovery: null, selection: null, operations: [], feedback: [], indexControls: { A: 'online', B: 'online' },
+    indexRead: null, experiment: null, recoveryCheck: null,
     feedbackCapacity: { total: SESSION_FEEDBACK_CAPACITY, used: 0, exhausted: false }, limitations: [
       mode === 'fixture' ? 'Synthetic fixture answers, three simulated operators and generated 1-of-2 EOA Safes on one host; not independent custody or real city facts.' :
         'Source-backed licensed mode with three simulated operators and generated 1-of-2 EOA Safes on one host. Owned-test inference is not live utility, terms clearance or independent custody.',
@@ -159,7 +187,11 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
   let state = initial(); let queue = Promise.resolve();
   let resetting: Promise<void> | undefined; let closing: Promise<void> | undefined;
   const operations = new Map<string, { action: string; view: SessionOperation; done: Promise<void> }>();
-  const invocations = new Map<string, PrivateInvocation>(); let raw: RankingEvidenceInput | undefined;
+  const indexExperiments = new Map<string, IndexExperiment>();
+  const recoveryChecks = new Map<string, RecoveryCheck>();
+  const invocations = new Map<string, PrivateInvocation>();
+  // Private historical checkpoint; state.discovery separately gates current selection and fresh-consumer actions.
+  let raw: RankingEvidenceInput | undefined;
   const feedback = new Map<string, PrivateFeedback>();
   const retainedOrder = new Map<string, RetainedJourney>();
   const clearContent = () => { for (const holder of retainedOrder.values()) holder.close(); retainedOrder.clear(); };
@@ -205,7 +237,7 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
     const owned = requireFixture(); state.selection = null;
     const block = await owned.chain.getBlock();
     const reviewer = owned.callers.accepted.address.toLowerCase();
-    raw = { rpcOrigin: owned.rpcOrigin, cardOrigin: owned.cardOrigin, identityDomain: owned.domain,
+    const input: RankingEvidenceInput = { rpcOrigin: owned.rpcOrigin, cardOrigin: owned.cardOrigin, identityDomain: owned.domain,
       provenance: owned.feedback.provenance, observation: { blockNumber: block.number, blockHash: block.hash },
       indexes: [{ origin: owned.origins.A, source: owned.feedback.source }, { origin: owned.origins.B, source: owned.feedback.source }],
       policy: { id: 'session-demo-reviewer-policy', version: '0.1', reviewers: [reviewer],
@@ -213,16 +245,18 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
       scope: { city, task: 'evening-plan', rubric: 'evening-plan-usefulness-v0.1' }, services: [],
       privateBundleFiles: [...new Map([...feedback.values()].map((entry) => [entry.view.documentHash, { documentHash: entry.view.documentHash, path: entry.bundlePath }])).values()],
       curatorInclusions: owned.services.map(({ agent }) => ({ curator: 'session-demo-curator', agent })) };
-    const { services: _services, ...discoveryInput } = raw;
+    const { services: _services, ...discoveryInput } = input;
     const discovery = await discoverRanked({ ...discoveryInput, city, signal }); signal.throwIfAborted();
-    raw = { ...raw, services: discovery.selected.map(({ agent }) => ({ agent })),
-      curatorInclusions: (raw.curatorInclusions ?? []).filter(({ agent }) => discovery.selected.some((candidate) => sameIdentity(candidate.agent, agent))) };
+    raw = { ...input, services: discovery.selected.map(({ agent }) => ({ agent })),
+      curatorInclusions: (input.curatorInclusions ?? []).filter(({ agent }) => discovery.selected.some((candidate) => sameIdentity(candidate.agent, agent))) };
     state.discovery = discovery;
+    state.indexRead = observeIndexes(discovery, owned.origins);
     for (const entry of feedback.values()) {
       entry.view.weighting = entry.view.reviewer === 'new' ? 'reviewer-not-accepted' :
         discovery.ranking.policyResult?.candidates.flatMap((candidate) => candidate.reviews)
           .find((review) => review.documentDigest === entry.view.documentHash)?.reason ?? 'not-assessed-at-this-observation';
     }
+    return discovery;
   };
   const submit = async (entry: PrivateInvocation, signal: AbortSignal) => {
     const owned = requireFixture(); signal.throwIfAborted();
@@ -353,10 +387,55 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
       return publishFeedback(entry, signal);
     }
     const owned = requireFixture(); state.selection = null;
-    if (action.kind === 'index') return owned.index(action.index, action.state);
+    if (action.kind === 'index') {
+      const experiment = indexExperiments.get(id);
+      if (experiment) {
+        const prior = state.discovery;
+        if (!experiment.before && prior && prior.city === action.city) experiment.before = observeIndexes(prior, owned.origins);
+        state.experiment = experiment;
+      }
+      state.discovery = null; state.indexRead = null; state.selection = null;
+      // A stopped upstream cannot produce a forged record. Restore it explicitly
+      // before routing its reply through the local alteration proxy.
+      if (action.state === 'tamper' && state.indexControls.A === 'offline') {
+        await owned.index('A', 'restart'); signal.throwIfAborted();
+        if (experiment) experiment.note = 'Index A was restored before altering its reply.';
+      }
+      await owned.index(action.index, action.state); signal.throwIfAborted();
+      state.indexControls[action.index] = action.state === 'stop' ? 'offline' : action.state === 'tamper' ? 'altered' : 'online';
+      if (!action.city) return;
+      if (experiment) experiment.phase = 'discovering';
+      await refresh(action.city, signal);
+      if (experiment) { experiment.after = state.indexRead; experiment.phase = 'observed'; }
+      return;
+    }
     if (action.kind === 'recover') {
+      const check = recoveryChecks.get(id);
+      if (check && !check.city) check.city = state.discovery?.city ?? null;
+      if (check) state.recoveryCheck = check;
+      // An earlier queued read may have republished its premigration view after
+      // start() invalidated it. Clear again at the serialized mutation boundary.
+      state.discovery = null; state.indexRead = null; state.selection = null; raw = undefined;
       const operator = state.operators.find((item) => item.id === action.operatorId);
-      if (!operator) throw new Error('unknown operator'); operator.recovery = await owned.recover(action.operatorId, signal); return;
+      if (!operator) throw new Error('unknown operator');
+      operator.recovery = await owned.recover(action.operatorId, signal); signal.throwIfAborted();
+      if (!check?.city) {
+        if (check) { check.status = 'unavailable'; check.reason = 'Recovery observed; choose a city for a fresh endpoint comparison.'; }
+        return;
+      }
+      check.status = 'checking'; check.reason = 'Recovery observed; checking the migrated public endpoint.';
+      try {
+        const fresh = await refresh(check.city, signal);
+        const cityId = operator.services.find((service) => service.city === check.city)?.agentId;
+        const current = fresh.selected.find((candidate) => candidate.agent.agentId === cityId);
+        if (current?.profile.endpoint) { check.status = 'observed'; check.endpoint = current.profile.endpoint;
+          check.reason = 'Same city service ID was verified at a fresh local-chain observation with its current public endpoint.'; }
+        else { check.status = 'unavailable'; check.reason = 'Recovery observed, but no current verified endpoint was returned for this service.'; }
+      } catch (error) {
+        signal.throwIfAborted(); state.discovery = null; state.indexRead = null; raw = undefined;
+        check.status = 'unavailable'; check.reason = 'Recovery observed, but fresh endpoint verification was unavailable.';
+      }
+      return;
     }
     if (action.kind !== 'stop-providers') throw new Error('unknown action');
     for (const service of owned.services) { signal.throwIfAborted(); await owned.stopProvider(service.agent); }
@@ -434,7 +513,8 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
   const stop = async () => {
     abort.abort(new Error('session reset')); clearContent();
     try { await queue; release(); await finished; }
-    finally { clearContent(); await ledger?.settled(); fixture = undefined; operations.clear(); invocations.clear(); feedback.clear(); raw = undefined; }
+    finally { clearContent(); await ledger?.settled(); fixture = undefined; operations.clear(); invocations.clear(); feedback.clear();
+      indexExperiments.clear(); recoveryChecks.clear(); raw = undefined; }
   };
   const session: DemoSession = {
     view: () => {
@@ -456,17 +536,47 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
     start: (input, id = randomUUID()) => {
       requireFixture(); if (!operationIdSchema.safeParse(id).success) throw new Error('invalid operation identity');
       const action = (mode === 'licensed' ? licensedActionSchema : options.mode !== 'licensed' && options.answerEngine === 'openclaw' ? openclawActionSchema : fixtureActionSchema).parse(input) as SessionAction;
+      if (action.kind === 'index' && action.index === 'B' && action.state === 'tamper') throw new Error('only Index A has an owned alteration proxy');
       const encoded = JSON.stringify(action), old = operations.get(id);
       if (old) { if (old.action !== encoded) throw new Error('operation identity conflict'); return structuredClone(old.view); }
       if (options.mode === 'licensed' && action.kind === 'invoke' && (action.reviewer !== options.admittedReviewer ||
           !state.selection || action.input?.city !== state.discovery?.city || Date.parse(action.input!.timeWindow.start) <= Date.now() ||
           Date.parse(options.retention.expiresAt) <= Date.now())) throw new Error('licensed invocation unavailable');
+      if (action.kind === 'index') {
+        const before = action.city && state.discovery?.city === action.city && fixture ? observeIndexes(state.discovery, fixture.origins) : null;
+        state.discovery = null; state.indexRead = null; state.selection = null;
+        state.experiment = action.city ? { target: action.index, action: action.state, city: action.city,
+          phase: 'applying', before, after: null, note: before ? 'Comparing the same city before and after this control.' : 'No prior comparison for this city.' } : null;
+        if (state.experiment) indexExperiments.set(id, state.experiment);
+      }
+      if (action.kind === 'recover') {
+        const check: RecoveryCheck = { operatorId: action.operatorId, city: state.discovery?.city ?? null,
+          status: 'recovering', endpoint: null, reason: 'Prior discovery invalidated; wallet recovery has not yet been observed.' };
+        recoveryChecks.set(id, check); state.recoveryCheck = check;
+        state.discovery = null; state.indexRead = null; state.selection = null; raw = undefined;
+      }
       const view: SessionOperation = { id, generation, kind: action.kind, state: state.operations.some((item) => item.state === 'running') ? 'queued' : 'running' };
       const signal = abort.signal; state.operations.push(view);
       const done = queue.then(async () => {
         signal.throwIfAborted(); view.state = 'running';
         await runInOwnedScope(() => withOwnedLifecycle(() => act(action, id, signal), signal)); view.state = 'completed';
-      }).catch(() => { view.state = signal.aborted ? 'cancelled' : 'failed'; view.error = signal.aborted ? 'session cancelled' : 'action unavailable or precondition changed'; });
+      }).catch(() => {
+        view.state = signal.aborted ? 'cancelled' : 'failed';
+        if (action.kind === 'index') {
+          const experiment = indexExperiments.get(id), effectKnown = experiment?.phase === 'discovering';
+          view.error = signal.aborted ? `Index ${action.index} ${action.state} cancelled; outcome may be unknown` :
+            effectKnown ? `Index ${action.index} control changed, but fresh discovery was unavailable` :
+              `Index ${action.index} ${action.state} did not complete; outcome unknown`;
+          if (state.generation === view.generation) {
+            if (!effectKnown) state.indexControls[action.index] = 'unknown';
+            if (experiment) { experiment.phase = signal.aborted ? 'cancelled' : 'failed'; experiment.note = view.error; state.experiment = experiment; }
+          }
+        } else if (action.kind === 'recover') {
+          const check = recoveryChecks.get(id);
+          view.error = signal.aborted ? 'Recovery cancelled; wallet outcome may be unknown' : 'Recovery did not complete; wallet outcome unknown';
+          if (check && state.generation === view.generation) { check.status = signal.aborted ? 'cancelled' : 'unavailable'; check.reason = view.error; state.recoveryCheck = check; }
+        } else view.error = signal.aborted ? 'session cancelled' : 'action unavailable or precondition changed';
+      });
       queue = done; operations.set(id, { action: encoded, view, done }); return structuredClone(view);
     },
     wait: async (id) => { const operation = operations.get(id); if (!operation) throw new Error('unknown operation'); await operation.done; return structuredClone(operation.view); },

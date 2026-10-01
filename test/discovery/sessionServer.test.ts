@@ -7,6 +7,7 @@ import { eveningPlanInputSchema } from '../../src/a2a/input.js';
 function state(): SessionView {
   return { mode: 'fixture', generation: 0, status: 'ready', lifecycleOperationId: 'life', operators: [], crossOperatorWrite: 'not-tested',
     invocations: [], discovery: null, selection: null, operations: [], feedback: [], freshConsumer: null, originComparison: null,
+    indexControls: { A: 'online', B: 'online' }, indexRead: null, experiment: null,
     feedbackCapacity: { total: 16, used: 0, exhausted: false }, limitations: [] };
 }
 test('loopback HTTP boundary rejects foreign requests and preserves one operation across duplicate POST and read refresh', async () => {
@@ -46,6 +47,14 @@ test('loopback HTTP boundary rejects foreign requests and preserves one operatio
       const saved = await send('', {}, 'GET', path); assert.equal(saved.status, 200);
       assert.equal(saved.body.includes(token), false); assert.equal(saved.body.includes('<form'), false);
     }
+    const nativePanel = new URLSearchParams({ token, generation: '0', operationId: 'index-panel', action: 'index',
+      index: 'A', state: 'stop', city: 'Chicago', panel: 'resilience' }).toString();
+    const panelPost = await send(nativePanel);
+    assert.equal(panelPost.status, 303);
+    assert.equal(panelPost.headers.location, '/?operation=index-panel#resilience');
+    assert.equal(starts, 2, 'native form queues the same compound action once');
+    assert.equal((await send(nativePanel)).status, 303);
+    assert.equal(starts, 2);
     const reset = new URLSearchParams({ token, generation: '0', operationId: 'reset', action: 'reset' }).toString();
     assert.equal((await send(reset)).status, 303); assert.equal(resets, 1);
     assert.equal((await send(form)).status, 403, 'old generation token is invalidated');

@@ -24,7 +24,7 @@ export function journey(view: SessionView): JourneyStep[] {
     { label: 'Choose', state: chosen ? 'done' : compared ? 'current' : 'waiting', note: selectedNow ? 'Specialist selected; no request sent by selection' : latestRequest ? 'You chose a specialist in this city' : 'Compare the complete plans', target: 'choose' },
     { label: 'Ask', state: asked ? 'done' : chosen ? 'current' : 'waiting', note: asked ? 'A completed answer passed the byte check' : 'Send a signed request directly to one operator', target: 'ask' },
     { label: 'Review', state: reviewed ? 'done' : asked ? 'current' : 'waiting', note: reviewed ? 'Feedback publication and read-back observed' : 'Rate an observed result', target: 'review' },
-    { label: 'Try resilience', state: resilience ? 'done' : reviewed ? 'current' : 'waiting', note: resilience ? 'At least one local control completed; compare again for its effect' : 'Test Index loss or operator recovery', target: 'resilience' },
+    { label: 'Try resilience', state: resilience ? 'done' : reviewed ? 'current' : 'waiting', note: resilience ? view.experiment?.phase === 'observed' ? 'Index control and fresh comparison observed' : 'At least one local control completed; inspect its observed effect' : 'Test Index loss or operator recovery', target: 'resilience' },
   ];
 }
 
@@ -32,6 +32,25 @@ export function currentMoment(view: SessionView): { title: string; detail: strin
   const latest = view.operations.at(-1);
   if (view.status === 'starting') return { title: 'The city is getting ready', detail: 'Preparing the local chain, three simulated operators and two real Index processes. No request has been sent.', tone: 'pending' };
   if (view.status === 'resetting') return { title: 'Resetting this session', detail: 'Owned work is being cancelled and cleaned up before the next generation starts.', tone: 'pending' };
+  const experiment = view.experiment;
+  if (latest?.kind === 'index' && experiment) {
+    if (experiment.phase === 'observed' && experiment.after) return { title: `Index ${experiment.target} ${experiment.action}: fresh ${experiment.city} result`,
+      detail: `A ${experiment.after.indexes.A.status} (${experiment.after.indexes.A.verified} verified, ${experiment.after.indexes.A.rejected} rejected); B ${experiment.after.indexes.B.status} (${experiment.after.indexes.B.verified} verified). ${experiment.after.services.length} remaining unique services. No service invoked.`,
+      tone: experiment.after.services.length ? 'calm' : 'warning' };
+    return { title: `Index ${experiment.target} ${experiment.action}: ${experiment.phase}`,
+      detail: experiment.phase === 'applying' ? 'Control in progress; no new result observed.' : experiment.phase === 'discovering' ?
+        'Control applied; fresh discovery and verification in progress.' : experiment.note,
+      tone: experiment.phase === 'failed' || experiment.phase === 'cancelled' ? 'warning' : 'pending' };
+  }
+  const recovery = view.recoveryCheck;
+  if (latest?.kind === 'recover' && recovery) {
+    const operator = view.operators.find((item) => item.id === recovery.operatorId);
+    const ids = operator?.services.map((service) => `${service.city} service #${service.agentId}`).join(', ') ?? 'service IDs unavailable';
+    if (recovery.status === 'observed') return { title: 'Recovery checked at a fresh observation',
+      detail: `${ids} remain. Current ${recovery.city ?? 'city'} endpoint: ${recovery.endpoint ?? 'not verified'}.`, tone: 'calm' };
+    return { title: `Recovery ${recovery.status}`, detail: recovery.reason,
+      tone: recovery.status === 'recovering' || recovery.status === 'checking' ? 'pending' : 'warning' };
+  }
   if (view.status === 'failed' || latest?.state === 'failed') return { title: 'An action could not complete', detail: latest?.error ?? 'The session is unavailable. The operation list below preserves what was observed.', tone: 'warning' };
   if (latest?.state === 'queued' || latest?.state === 'running') return { title: `${latest.kind.replace(/-/g, ' ')} in progress`, detail: 'This is still pending. The diagram is explanatory; completion appears only after an observed result.', tone: 'pending' };
   if (view.discovery && view.discovery.ranking.snapshot !== 'matched') return { title: 'Comparison needs a fresh look', detail: 'Candidates may be present, but the ranking basis is unavailable or changed. Compare this city again before choosing or asking.', tone: 'warning' };

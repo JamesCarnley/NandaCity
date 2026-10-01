@@ -35,9 +35,11 @@ prerequisites without blocking this demo or claiming a Town pass.
    separately observed sent, accepted and completed stages.
 3. Rate its usefulness. Publication, canonical read-back, Index retention and
    policy contribution are separate findings. A new reviewer remains unweighted.
-4. Expand resilience controls. Stop or tamper with Index A, stop B too, then
-   recover the actual processes and compare again. Migrate an operator using its
-   generated backup: both city IDs remain while owner/runtime/endpoints change.
+4. Open **Experiments**. Take A offline, alter A's reply, or restore A; each
+   control immediately rechecks the same city and shows A/B verification and
+   remaining services beside the controls and map. The advanced B control lets
+   you test both-down discovery. Open **Ownership** to migrate an operator using
+   its generated backup: both city IDs remain while owner/runtime/endpoints change.
 5. Recompute the frozen ranking in a fresh process. This uses the same verifier
    on the same host, not an independent implementation or an offline proof. The
    separate card host and local RPC remain required after provider endpoints stop.

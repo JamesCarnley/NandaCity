@@ -9,7 +9,8 @@ import { withOwnedLifecycle } from './ownedLifecycle.js';
 
 const MAX_BODY = 16 * 1024;
 const operationId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
-const common = { token: z.string(), generation: z.string().regex(/^(0|[1-9][0-9]*)$/), operationId };
+const common = { token: z.string(), generation: z.string().regex(/^(0|[1-9][0-9]*)$/), operationId,
+  panel: z.enum(['discover', 'ask', 'review', 'resilience', 'ownership']).optional() };
 const actionSchema = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('refresh'), city: z.enum(['Chicago', 'Boston']) }),
   z.strictObject({ ...common, action: z.literal('select'), service: z.string().max(160) }),
@@ -19,7 +20,8 @@ const actionSchema = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('feedback'), invocationId: operationId, value: z.enum(['1', '2', '3', '4', '5']) }),
   z.strictObject({ ...common, action: z.literal('retry'), invocationId: operationId }),
   z.strictObject({ ...common, action: z.literal('retry-feedback'), feedbackId: operationId }),
-  z.strictObject({ ...common, action: z.literal('index'), index: z.enum(['A', 'B']), state: z.enum(['stop', 'start', 'restart', 'tamper']) }),
+  z.strictObject({ ...common, action: z.literal('index'), index: z.enum(['A', 'B']), state: z.enum(['stop', 'start', 'restart', 'tamper']),
+    city: z.enum(['Chicago', 'Boston']).optional() }),
   z.strictObject({ ...common, action: z.literal('recover'), operatorId: z.enum(['operator-1', 'operator-2', 'operator-3']) }),
   z.strictObject({ ...common, action: z.enum(['reset', 'stop-providers', 'fresh-consumer', 'origin-comparison']) }),
 ]);
@@ -141,13 +143,13 @@ export async function startSessionServer(session: DemoSession, port = 0): Promis
               }
             }
           } else {
-            const { token: _token, operationId: _id, generation: _generation, action: kind, ...fields } = value;
+            const { token: _token, operationId: _id, generation: _generation, panel: _panel, action: kind, ...fields } = value;
             action = { kind, ...fields, ...(kind === 'feedback' ? { value: Number((value as { value: string }).value) } : {}) } as SessionAction;
           }
           session.start(action, value.operationId); submissions.set(value.operationId, serialized);
         }
       }
-      res.writeHead(303, { location: `/?operation=${encodeURIComponent(value.action === 'reset' ? resetSubmission!.id : value.operationId)}` }); res.end();
+      res.writeHead(303, { location: `/?operation=${encodeURIComponent(value.action === 'reset' ? resetSubmission!.id : value.operationId)}${value.panel ? `#${value.panel}` : ''}` }); res.end();
     } catch (error) {
       const status = error instanceof HttpFailure ? error.status : 409;
       res.statusCode = status; res.setHeader('content-type', 'text/plain; charset=utf-8');

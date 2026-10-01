@@ -3,6 +3,7 @@ import test from 'node:test';
 import { keccak256, stringToHex } from 'viem';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { isDeepStrictEqual } from 'node:util';
 import { checkpointFixture, SLOT, CALLS, I, R, PROXY, ZERO, ONE, TWO, TOPICS, h, log, publication,
   response, type Exchange } from './fixtures/pairZeroCheckpoint.js';
 import { readFreshPairZeroCheckpoint as read, type FreshPairZeroInput } from '../../src/feedback/pairZeroCheckpoint.js';
@@ -173,17 +174,33 @@ test('pre-aborted and between-acquisition cancellation do not continue or retry'
 
 async function withHttp(run: (url: string, seen: unknown[]) => Promise<void>, handler?: (res: import('node:http').ServerResponse, body: any) => void) {
   const es = exchanges(checkpointFixture()), seen: unknown[] = [];
+  const remaining = [...es];
+  const unexpected: string[] = [];
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = []; for await (const c of req) chunks.push(Buffer.from(c));
-    const body = JSON.parse(Buffer.concat(chunks).toString()); seen.push(body);
+    let body: any;
+    try { body = JSON.parse(Buffer.concat(chunks).toString()); }
+    catch { unexpected.push('malformed JSON-RPC request'); res.writeHead(400).end(); return; }
+    seen.push(body);
     if (handler) { handler(res, body); return; }
-    const expected = es[seen.length - 1]; assert.ok(expected); assert.equal(body.method, expected.method); assert.deepEqual(body.params ?? [], expected.params);
-    res.setHeader('content-type', 'application/json'); res.end(response(body.id, parsed(expected)));
+    const matchedAt = remaining.findIndex((exchange) => exchange.method === body.method && isDeepStrictEqual(exchange.params, body.params ?? []));
+    const expected = matchedAt < 0 ? undefined : remaining.splice(matchedAt, 1)[0];
+    res.setHeader('content-type', 'application/json');
+    if (!expected) {
+      unexpected.push(JSON.stringify([body.method, body.params ?? []]));
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, error: { code: -32000, message: 'unexpected test RPC request' } }));
+      return;
+    }
+    res.end(response(body.id, parsed(expected)));
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const bound = server.address(); assert.ok(bound && typeof bound !== 'string');
+  let failure: unknown;
   try { await run(`http://127.0.0.1:${bound.port}/private-provider-key`, seen); }
+  catch (error) { failure = error; }
   finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  assert.deepEqual(unexpected, [], 'every HTTP request must match an exact method and params fixture');
+  if (failure) throw failure;
 }
 
 test('owned HTTP yields the same qualified history, complete recheck ledger and no source configuration', async () => {
@@ -195,18 +212,59 @@ test('owned HTTP yields the same qualified history, complete recheck ledger and 
         bytes(n) { charged += n; }, close() { closed++; } };
     } } });
     assert.equal(r.finding.status, 'matched', JSON.stringify(r.finding.diagnostics)); assert.equal(r.ledger.entries.length, seen.length);
+    assert.equal(seen.length, exchanges(checkpointFixture()).length, 'every exact fixture request is consumed once');
     assert.equal(r.ledger.complete, true); assert.equal(r.finding.rawEvidenceRefs.length, seen.length);
     assert.equal(charged, r.ledger.entries.reduce((n, e) => n + (e.responseUtf8?.length ?? 0), 0), 'each successful physical wire byte is charged exactly once');
     assert.equal(calls, seen.length); assert.equal(closed, seen.length);
     assert.ok(!JSON.stringify(r).includes('private-provider-key'));
-    for (const [n, entry] of r.ledger.entries.entries()) {
-      const raw = JSON.parse(new TextDecoder().decode(entry.responseUtf8)); assert.equal(raw.id, (seen[n] as any).id);
+    const seenById = new Map(seen.map((body: any) => [body.id, body]));
+    assert.equal(seenById.size, seen.length, 'every physical request has a distinct RPC ID');
+    const ledgerIds = new Set(r.ledger.entries.map((entry) => entry.requestId));
+    assert.equal(ledgerIds.size, r.ledger.entries.length, 'every ledger entry has a distinct RPC ID');
+    assert.deepEqual(ledgerIds, new Set(seenById.keys()), 'ledger and physical requests cover the same exact RPC IDs');
+    const expectedRefs: typeof r.finding.rawEvidenceRefs = [];
+    for (const entry of r.ledger.entries) {
+      const sent = seenById.get(entry.requestId) as any;
+      assert.ok(sent, 'ledger RPC ID must correspond to one physical request');
+      assert.equal(entry.method, sent.method); assert.deepEqual(entry.params, sent.params ?? []);
+      const raw = JSON.parse(new TextDecoder().decode(entry.responseUtf8)); assert.equal(raw.id, entry.requestId);
       assert.equal(entry.disposition, 'result');
-      assert.deepEqual(r.finding.rawEvidenceRefs[n], { method: entry.method,
+      expectedRefs.push({ method: entry.method,
         requestDigest: keccak256(stringToHex(JSON.stringify([entry.method, entry.params]))),
         responseDigest: keccak256(stringToHex(JSON.stringify(raw.result))) });
     }
+    const order = (a: unknown, b: unknown) => JSON.stringify(a).localeCompare(JSON.stringify(b));
+    assert.deepEqual([...r.finding.rawEvidenceRefs].sort(order), [...expectedRefs].sort(order),
+      'every exact request/result digest appears once, regardless of concurrent completion order');
   });
+});
+
+test('owned HTTP accepts a tokenURI request arriving before its parallel ownerOf request', { timeout: 15000 }, async () => {
+  const originalFetch = globalThis.fetch;
+  const uriAnswered = Promise.withResolvers<void>();
+  const releaseTimer = setTimeout(() => uriAnswered.resolve(), 3000);
+  let ownerHeld = false, uriFirst = false;
+  globalThis.fetch = async (input, init) => {
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { method?: string; params?: [{ data?: string }] } : null;
+    const data = body?.method === 'eth_call' ? body.params?.[0]?.data : null;
+    if (data === CALLS.ownerOf) { ownerHeld = true; await uriAnswered.promise; return originalFetch(input, init); }
+    if (data === CALLS.uri) { try { const response = await originalFetch(input, init); uriFirst = true; return response; }
+      finally { uriAnswered.resolve(); } }
+    return originalFetch(input, init);
+  };
+  try {
+    await withHttp(async (url, seen) => {
+      const result = await read({ ...checkpointFixture(), source: { kind: 'bounded-http', url } });
+      assert.equal(ownerHeld, true); assert.equal(uriFirst, true);
+      const callPosition = (data: string) => seen.findIndex((body: any) => body.method === 'eth_call' && body.params?.[0]?.data === data);
+      assert.ok(callPosition(CALLS.uri) >= 0 && callPosition(CALLS.uri) < callPosition(CALLS.ownerOf),
+        'the real HTTP server must receive tokenURI before ownerOf');
+      assert.equal(result.finding.status, 'matched', JSON.stringify(result.finding.diagnostics));
+      assert.equal(result.ledger.complete, true);
+      assert.equal(result.ledger.entries.length, seen.length);
+      assert.equal(seen.length, exchanges(checkpointFixture()).length, 'every exact fixture request is consumed once');
+    });
+  } finally { clearTimeout(releaseTimer); uriAnswered.resolve(); globalThis.fetch = originalFetch; }
 });
 
 test('HTTP ledger exhaustion stops dispatch without an oversized or successful incomplete ledger', async () => {
@@ -251,15 +309,18 @@ test('HTTP cancellation aborts and drains the owned body before the parent lease
   assert.equal(serverClosed, true);
 });
 
-test('per-call and total deadlines stop a stalled HTTP body, close leases, and never retry', async () => {
-  for (const limits of [{ rpcTimeoutMs: 15 }, { totalTimeoutMs: 15 }]) {
-    let closed = 0;
+test('per-call and total deadlines stop a stalled HTTP body, close leases, and never retry', { timeout: 15000 }, async () => {
+  for (const limits of [{ rpcTimeoutMs: 1000 }, { totalTimeoutMs: 1000 }]) {
+    let closed = 0, bodyStarted = false;
     await withHttp(async (url, seen) => {
       const started = performance.now(); const r = await rejectsFinding({ ...checkpointFixture(), limits, source: { kind: 'bounded-http', url },
         parentBudget: { async open() { return { signal: new AbortController().signal, check() {}, bytes() {}, close() { closed++; } }; } } }, 'unavailable');
-      assert.equal(seen.length, 1); assert.equal(closed, 1); assert.ok(performance.now() - started < 1000);
+      assert.equal(seen.length, 1, 'one physical RPC must reach the server before the deadline');
+      assert.equal(bodyStarted, true, 'the server must begin the deliberately stalled response');
+      assert.equal(closed, 1); assert.ok(performance.now() - started < 2500, 'the deadline must beat the five-second HTTP fallback');
+      assert.equal(r.ledger.entries.length, 1, 'the stalled RPC must be recorded once without retry');
       assert.equal(r.ledger.entries[0]?.disposition, 'aborted');
-    }, res => res.write('{"jsonrpc":'));
+    }, res => { res.write('{"jsonrpc":'); bodyStarted = true; });
   }
 });
 

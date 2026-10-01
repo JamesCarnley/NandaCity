@@ -19,7 +19,7 @@ export type DiscoveryProfile = Readonly<{
   blockNumber: string; blockHash: Hex; cardDigest: Hex; agentUriDigest: Hex; endpoint: string;
 }>;
 export type RankedDiscoveryCandidate = Readonly<{
-  observerOrigin: string; agent: AgentRef; service: string;
+  observerOrigin: string; agent: AgentRef; service: string; observedName?: string;
 }> & (
   | Readonly<{ status: 'verified'; profile: DiscoveryProfile; reason?: never }>
   | Readonly<{ status: 'rejected' | 'unavailable'; reason: string; profile?: never }>
@@ -139,7 +139,8 @@ export async function discoverRanked(input: RankedDiscoveryInput, options: Ranke
         ? 'candidate outside client-selected identity domain' : null,
       onFiltered: (observerOrigin, agent, reason) => candidates.push({ observerOrigin, agent, service: serviceKey(agent), status: 'rejected', reason }),
       onCandidate: async (candidate) => {
-        const base = { observerOrigin: candidate.observerOrigin, agent: candidate.agent, service: serviceKey(candidate.agent) };
+        const base = { observerOrigin: candidate.observerOrigin, agent: candidate.agent, service: serviceKey(candidate.agent),
+          observedName: candidate.declaration.displayName };
         try {
           if (candidate.declaration.url !== `${config.cardOrigin}/cards/${candidate.agent.agentId}.json`) {
             throw new RejectedDiscovery('card URL outside exact configured origin/path');
@@ -205,6 +206,7 @@ export async function discoverRanked(input: RankedDiscoveryInput, options: Ranke
     origins: cancelled ? acquisition.map((origin) => ({ ...origin, status: 'unavailable' as const })) : acquisition,
     candidates: cancelled ? candidates.map((candidate) => candidate.status === 'verified' ? {
       observerOrigin: candidate.observerOrigin, agent: candidate.agent, service: candidate.service,
+      ...(candidate.observedName ? { observedName: candidate.observedName } : {}),
       status: 'unavailable' as const, reason: 'caller cancelled discovery' } : candidate) : candidates,
     selected: cancelled ? [] : selected, eligibleCount: cancelled ? 0 : byIdentity.size,
     shortlist, diagnostics: [...(shortlist === 'partial' ? ['partial-shortlist'] : []), ...(cancelled ? ['cancelled'] : [])], ranking };
