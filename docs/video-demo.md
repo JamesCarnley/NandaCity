@@ -28,13 +28,17 @@ wallet material or the OpenClaw administration screen.
 
 ## Show these five moments
 
-1. **Discover and choose.** Compare Chicago. Each operator also serves Boston;
-   food, culture and travel/value are competing complete-service choices.
-   Expand “Why this position?” to show that the selection has an explained policy,
-   not a mysterious universal trust score.
-2. **Ask a specialist.** Select one, set a preference such as “Keep costs low and
-   travel simple,” and press Ask. Show the model's explanation, the complete
-   plan, and sent → accepted → completed → byte-check observations. A signed
+1. **Discover and choose.** The actor scene shows your City demo client searching
+   two Indexes, checking owner records, then asking the chosen specialist directly.
+   Follow the Discover → Choose journey links and compare Chicago. Each operator
+   also serves Boston; food, culture and travel/value are competing complete
+   evening plans. Open “Why this position?” for the policy explanation, then the
+   nested JSON only if exact evidence is useful. “Why doesn't every rating count?”
+   explains the disclosed accepted-reviewer rule without calling newcomers bad.
+2. **Ask a specialist.** Select one, leave the $150/two-person example or change
+   the dollar budget and preference, then press Ask. Show the model's explanation,
+   dinner/activity/transport itinerary, and signed request timeline. Its milestones
+   reflect sent → accepted → completed → byte-check observations, not animation. A signed
    response proves who said what, not that its advice is correct.
 3. **Make feedback useful.** Publish a usefulness rating and compare again.
    Show the score and its evidence. This disclosed demo reviewer is admitted by
@@ -42,12 +46,13 @@ wallet material or the OpenClaw administration screen.
    acquire ranking influence. No positive review approval is granted to the seller.
    A single 5/5 review displays a 3.67/5 policy score: this policy pulls small
    samples toward a neutral starting point rather than awarding instant perfection.
-4. **Remove the middleman.** Expand resilience, stop Index A, then compare.
+4. **Remove the middleman.** In Try resilience, stop Index A, then compare.
    Index B still discovers authentic services. Recover A, tamper with it, stop B,
    and compare again: altered records are rejected, not treated as operator truth.
    Recover both Indexes before continuing.
 5. **Keep identity through change.** Recover and migrate an operator. Compare
-   again and ask it: both city IDs remain while its owner, runtime signer and
+   again and ask it: the familiar specialist card and both city IDs remain while
+   its owner, runtime signer and
    endpoints change. Then recompute the frozen ranking in a fresh process to
    show that selection can be checked rather than merely trusted.
 
@@ -55,6 +60,11 @@ Optional closing: select Boston; show the deliberate signed failure (injected
 before inference, not a failed model call); or run the
 explicit chain-free comparison. Reset rebuilds the local fixture and waits for
 its owned cleanup. It does not erase OpenClaw history or refill the model allowance.
+
+The page retains native forms if browser enhancement is unavailable. With
+enhancement, status refreshes preserve the current city, edits and focus where
+the generation and selection still match; custom dollar amounts are converted
+to the existing cents field. A no-JavaScript form shows cents directly.
 
 For a short video, lead with the working journey, then the two Index failure
 controls and identity recovery. Show exact evidence only when explaining one

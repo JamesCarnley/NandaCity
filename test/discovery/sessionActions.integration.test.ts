@@ -8,7 +8,11 @@ import { syncBuiltinESMExports } from 'node:module';
 test('session exposes fresh raw-evidence reconstruction and owns cancellation of the real origin comparison', { timeout: 360000 }, async (t) => {
   await withDemoSession(process.env.NANDA_INDEX_CHECKOUT!, async (session) => {
     const server = await startSessionServer(session); t.after(() => server.close());
-    const starting = await (await fetch(server.origin)).text(); assert.match(starting, /Preparing local chain/);
+    const starting = await (await fetch(server.origin)).text();
+    assert.match(starting, /The city is getting ready/);
+    const refreshForm = starting.match(/<form\b[^]*?<\/form>/g)?.find((form) => form.includes('name="action" value="refresh"'));
+    assert.ok(refreshForm, 'city comparison form should render during startup');
+    assert.match(refreshForm, /<button[^>]*disabled/, 'comparison must remain disabled until local resources are ready');
     await session.ready();
     assert.doesNotThrow(() => session.start({ kind: 'fresh-consumer' }, 'before-discovery'));
     assert.equal((await session.wait('before-discovery')).state, 'failed');
