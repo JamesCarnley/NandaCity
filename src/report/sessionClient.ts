@@ -15,7 +15,7 @@ export const sessionClient = `(() => {
     const field = (name) => form.querySelector('input[type=hidden][name="' + name + '"]')?.value || '';
     return [field('action'), field('service'), field('invocationId'), field('feedbackId'), field('operatorId'), field('city'), field('index'), field('state')].join('|');
   };
-  const panels = new Set(['discover', 'ask', 'review', 'resilience', 'ownership']);
+  const panels = new Set(['overview', 'discover', 'ask', 'review', 'resilience', 'ownership']);
   const panelFromHash = () => {
     const hash = (location.hash || '').slice(1);
     return hash === 'choose' ? 'discover' : panels.has(hash) ? hash : null;
@@ -69,7 +69,7 @@ export const sessionClient = `(() => {
     const sameGeneration = next.dataset.generation === prior.generation;
     const sameInputs = sameGeneration && next.dataset.city === prior.city && next.dataset.selection === prior.selection;
     current.replaceWith(next);
-    setPanel(next, desiredPanel || panelFromHash() || prior.panel || 'discover');
+    setPanel(next, desiredPanel || panelFromHash() || prior.panel || 'overview');
     if (desiredPanel) {
       const destination = new URL(location.href);
       destination.hash = desiredPanel;
@@ -121,8 +121,8 @@ export const sessionClient = `(() => {
     if (!notice) { notice = document.createElement('p'); notice.id = 'client-error'; notice.className = 'notice'; notice.setAttribute('role', 'alert'); document.querySelector('.hero')?.after(notice); }
     notice.textContent = text;
   };
-  setPanel(document.querySelector('main'), panelFromHash() || 'discover');
-  window.addEventListener('hashchange', () => setPanel(document.querySelector('main'), panelFromHash() || 'discover'));
+  setPanel(document.querySelector('main'), panelFromHash() || 'overview');
+  window.addEventListener('hashchange', () => setPanel(document.querySelector('main'), panelFromHash() || 'overview'));
   document.addEventListener('click', (event) => {
     const link = event.target.closest('[data-panel-link]');
     if (link) setPanel(document.querySelector('main'), link.dataset.panelLink);

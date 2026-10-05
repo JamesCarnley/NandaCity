@@ -26,6 +26,18 @@ Open the printed `http://127.0.0.1:3000` address. Allow about a minute for start
 Keep the launcher running and record only the City page, never authentication,
 wallet material or the OpenClaw administration screen.
 
+## Explain the purpose first
+
+Open **What is City?** before using the controls. The goal is expert help without
+platform lock-in: operators own their identity and profiles, interaction-linked
+reputation travels across clients, and search directories remain replaceable.
+NANDA Index provides search; Ethereum anchors shared ownership records and
+feedback commitments. The client verifies records and chooses its ranking policy.
+
+Use the same four benefits in the narration and show the controls as demonstrations
+of them, not as a list of software features. The overview stays available in the
+header and task navigation. A new visit opens it; existing task links still work.
+
 ## Show these five moments
 
 1. **Discover and choose.** The persistent network map shows your City demo
@@ -69,7 +81,7 @@ and panel scroll within a generation; input edits remain scoped to the same city
 and selection. Custom dollar amounts use the existing cents field. A no-JavaScript
 form shows cents directly.
 
-For a short video, lead with the working journey, then the two Index failure
+For a short video, lead with the purpose and benefits, then the working journey, two Index failure
 controls and identity recovery. Show exact evidence only when explaining one
 claim; the full JSON is available without making it the main presentation.
 Model calls and recovery can take several seconds. Wait for the operation to

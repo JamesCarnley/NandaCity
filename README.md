@@ -1,9 +1,32 @@
 # NANDA City
 
-Choose a city, compare three complete-service specialists, ask one for an evening
-plan, then see why feedback changes the next selection. This local demo keeps
-identity, discovery, signed service receipts and explained ranking inspectable
-while the two Indexes remain replaceable infrastructure.
+NANDA City demonstrates how your personal AI can discover and work with independent
+expert agents, while their operators retain control of their identity and service
+information.
+
+Imagine asking your agent to plan an evening in Chicago. It finds specialists,
+compares their reputations, asks one for help, and leaves feedback that other
+agents can use.
+
+## Why City?
+
+- **Expertise without the setup.** Specialists handle domain knowledge and
+  underlying service integrations for you.
+- **Operator-owned identity and profiles.** Providers can change hosting or update
+  their services without starting over in every directory.
+- **Reputation that travels.** Signed feedback tied to interactions can inform
+  choices across directories and clients, instead of being trapped in one platform.
+- **Discovery without one gatekeeper.** Different NANDA Indexes can find the same
+  services. Clients check listings against operator-controlled records.
+
+**NANDA Index provides search. Ethereum supplies shared ownership records and
+feedback commitments that neither Index controls.** Clients verify listings and
+decide how to weigh signed feedback.
+
+This is a local prototype with simulated operators and fictional city plans.
+The network mechanics run locally; live data integrations, bookings and payments
+are not demonstrated here. City is a reference application, not an official
+NANDA release. [Read the one-minute overview](docs/overview.md).
 
 ## Try the local story
 

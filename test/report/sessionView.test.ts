@@ -52,6 +52,37 @@ function discoveredView(snapshot: 'unavailable' | 'changed'): SessionView {
 const active = { token: 'test-token', nonce: 'test-nonce' };
 const actionForm = (html: string, action: string) => html.match(/<form\b[^]*?<\/form>/g)?.find((form) => form.includes(`name="action" value="${action}"`));
 
+test('overview is an accessible read-only entry point in the app and saved snapshots', () => {
+  for (const options of [active, undefined]) {
+    const html = renderSessionView(emptyView(), options);
+    assert.match(html, /<main[^>]*data-panel="overview"/);
+    const overview = /<section class="task-panel" id="overview"[^>]*>([^]*?)<\/section>/.exec(html)?.[1];
+    assert.ok(overview, 'the overview must exist in both the live app and inert exports');
+    assert.match(html, /href="#overview" data-panel-link="overview"/);
+    assert.match(overview, /<h2[^>]*id="overview-title"/);
+    assert.match(overview, /href="#discover" data-panel-link="discover"/);
+    assert.equal(overview.includes('<form'), false, 'reading or leaving the introduction cannot queue an operation');
+  }
+});
+
+for (const hash of ['', '#overview', '#discover', '#review', '#choose']) test(`overview navigation preserves task deep links (${hash || 'first visit'})`, () => {
+  const current = { dataset: { panel: 'server-default' }, querySelectorAll: () => [] };
+  const listeners = new Map<string, () => void>();
+  const location = { href: `http://127.0.0.1:3000/${hash}`, hash };
+  let networkCalls = 0;
+  const document = { querySelector: () => current, querySelectorAll: () => [], addEventListener() {} };
+  const window = { __cityInitialStatus: { generation: 0, status: 'ready', operations: [] },
+    addEventListener: (event: string, listener: () => void) => listeners.set(event, listener) };
+  runInNewContext(sessionClient, { document, window, location, setInterval() {},
+    fetch: () => { networkCalls++; }, Date, Number, String, Event, Map });
+  assert.equal(current.dataset.panel, hash === '#choose' ? 'discover' : hash.slice(1) || 'overview');
+  location.hash = '#overview'; listeners.get('hashchange')!();
+  assert.equal(current.dataset.panel, 'overview');
+  location.hash = '#discover'; listeners.get('hashchange')!();
+  assert.equal(current.dataset.panel, 'discover');
+  assert.equal(networkCalls, 0, 'navigation is local and never starts discovery or a service request');
+});
+
 test('completed request leads with the answer and keeps the editable brief behind Ask again', () => {
   const view = discoveredView('unavailable'); view.selection = 'service-7';
   view.invocations = [{ id: 'reply-one', service: 'service-7', reviewer: 'accepted', requestDigest: `0x${'a'.repeat(64)}`,
