@@ -64,6 +64,83 @@ test('loopback HTTP boundary rejects foreign requests and preserves one operatio
   } finally { await server.close(); }
 });
 
+test('explicit HTTPS origin grants one browser lease and keeps other visitors away from mutation controls', async () => {
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  const view = state(); let starts = 0, resets = 0;
+  const session: DemoSession = { view: () => structuredClone(view), ready: async () => {}, select: () => {},
+    start: (action, id = 'id') => { starts++; return { id, generation: 0, kind: action.kind, state: 'running' }; },
+    wait: async () => { throw new Error(); }, frozenInput: () => { throw new Error(); }, readContent: () => undefined,
+    reset: async () => { resets++; }, close: async () => {} };
+  const publicOrigin = 'https://city.example';
+  const server = await startSessionServer(session, 0, { publicOrigin, leaseMs: 60_000 });
+  const send = (path: string, method = 'GET', body = '', headers: Record<string, string> = {}) =>
+    new Promise<{ status: number; body: string; headers: import('node:http').IncomingHttpHeaders }>((resolve, reject) => {
+      const req = request(`${server.origin}${path}`, { method, headers: { host: 'city.example', ...headers } }, (res) => {
+        let text = ''; res.setEncoding('utf8'); res.on('data', (part) => text += part);
+        res.on('end', () => resolve({ status: res.statusCode!, body: text, headers: res.headers }));
+      }); req.on('error', reject); req.end(body);
+    });
+  try {
+    assert.equal(server.browserOrigin, publicOrigin);
+    const health = await send('/healthz'); assert.equal(health.status, 200);
+    assert.deepEqual(JSON.parse(health.body), { status: 'ready' }); assert.equal(health.headers['set-cookie'], undefined);
+    const first = await send('/'); assert.equal(first.status, 200);
+    const setCookie = first.headers['set-cookie']?.[0];
+    assert.match(setCookie ?? '', /^nanda_city_lease=[0-9a-f]{64}; Path=\/; HttpOnly; Secure; SameSite=Strict;/);
+    const cookie = setCookie!.split(';', 1)[0]!;
+    assert.equal((await send('/')).status, 423, 'a second browser receives only the wait page');
+    const owner = await send('/', 'GET', '', { cookie: cookie! }); assert.equal(owner.status, 200);
+    const token = /name="token" value="([^"]+)"/.exec(owner.body)![1]!;
+    const form = new URLSearchParams({ token, generation: '0', operationId: 'public', action: 'refresh', city: 'Chicago' }).toString();
+    const postHeaders = { origin: publicOrigin, cookie: cookie!, 'content-type': 'application/x-www-form-urlencoded' };
+    assert.equal((await send('/action', 'POST', form, postHeaders)).status, 303); assert.equal(starts, 1);
+    assert.equal((await send('/action', 'POST', form, { ...postHeaders, cookie: '' })).status, 403);
+    assert.equal((await send('/action', 'POST', form, { ...postHeaders, origin: 'https://foreign.example' })).status, 403);
+    assert.equal(resets, 0);
+  } finally { await server.close(); }
+});
+
+test('explicitly disabled public lease admits multiple browsers into the shared session', async () => {
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  const session = { view: state, readContent: () => undefined } as unknown as DemoSession;
+  const server = await startSessionServer(session, 0, { publicOrigin: 'https://city.example', leaseMs: 0 });
+  const get = () => new Promise<{ status: number; cookie: string[] | undefined }>((resolve, reject) => {
+    const req = request(server.origin, { headers: { host: 'city.example' } }, (res) => {
+      res.resume(); res.on('end', () => resolve({ status: res.statusCode!, cookie: res.headers['set-cookie'] }));
+    }); req.on('error', reject); req.end();
+  });
+  try {
+    const first = await get(), second = await get();
+    assert.equal(first.status, 200); assert.equal(second.status, 200);
+    assert.equal(first.cookie, undefined); assert.equal(second.cookie, undefined);
+  } finally { await server.close(); }
+});
+
+test('expired public lease resets the owned session before a new visitor is admitted', async () => {
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  let resets = 0;
+  const session = { view: state, readContent: () => undefined, reset: async () => { resets++; } } as unknown as DemoSession;
+  const server = await startSessionServer(session, 0, { publicOrigin: 'https://city.example', leaseMs: 10 });
+  const get = (cookie?: string) => new Promise<number>((resolve, reject) => {
+    const req = request(server.origin, { headers: { host: 'city.example', ...(cookie ? { cookie } : {}) } }, (res) => {
+      res.resume(); res.on('end', () => resolve(res.statusCode!));
+    }); req.on('error', reject); req.end();
+  });
+  try {
+    let cookie: string | undefined;
+    const first = await new Promise<{ status: number; cookie?: string }>((resolve, reject) => {
+      const req = request(server.origin, { headers: { host: 'city.example' } }, (res) => {
+        const found = res.headers['set-cookie']?.[0];
+        res.resume(); res.on('end', () => resolve({ status: res.statusCode!, ...(found ? { cookie: found } : {}) }));
+      }); req.on('error', reject); req.end();
+    });
+    assert.equal(first.status, 200); cookie = first.cookie; assert.ok(cookie);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(await get(cookie), 503); await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(resets, 1); assert.equal(await get(), 200);
+  } finally { await server.close(); }
+});
+
 test('licensed HTTP form preserves the allowlisted walking plus transit choice', async () => {
   const { startSessionServer } = await import('../../src/demo/sessionServer.js');
   const view = state(); view.mode = 'licensed';

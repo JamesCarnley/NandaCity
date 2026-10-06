@@ -357,6 +357,7 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
     // --mount exposes tmpfs in .Mounts, so the same guard can reject image-created volumes.
     containerId = await docker.command(['run', '-d', '--name', containerName, '--label', `${LABEL}=${ownedLabel}`,
       '--mount', 'type=tmpfs,destination=/var/lib/postgresql/data',
+      '--memory', '384m', '--memory-swap', '384m', '--cpus', '1', '--pids-limit', '128',
       '-e', `POSTGRES_PASSWORD=${password}`, '-p', '127.0.0.1::5432', 'postgres:16'], 120_000);
     active();
     await assertEphemeralData();

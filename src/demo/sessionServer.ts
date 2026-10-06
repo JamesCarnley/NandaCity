@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
+import { isIP } from 'node:net';
 import { z } from 'zod';
 import { liveAnswerSchema } from '../live/answer.js';
 import { eveningPlanInputSchema } from '../a2a/input.js';
@@ -26,6 +27,42 @@ const actionSchema = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.enum(['reset', 'stop-providers', 'fresh-consumer', 'origin-comparison']) }),
 ]);
 class HttpFailure extends Error { constructor(readonly status: number) { super('Request refused'); } }
+export type SessionServerOptions = { bindHost?: string; publicOrigin?: string; leaseMs?: number };
+
+function checkedServerOptions(options: SessionServerOptions): Required<Pick<SessionServerOptions, 'bindHost'>> &
+  Pick<SessionServerOptions, 'publicOrigin' | 'leaseMs'> {
+  const bindHost = options.bindHost ?? '127.0.0.1';
+  if (isIP(bindHost) !== 4 || bindHost === '0.0.0.0') throw new Error('session bind host must be a specific IPv4 address');
+  let publicOrigin: string | undefined;
+  if (options.publicOrigin !== undefined) {
+    const parsed = new URL(options.publicOrigin);
+    if (parsed.protocol !== 'https:' || parsed.origin !== options.publicOrigin || parsed.username || parsed.password ||
+        parsed.pathname !== '/' || parsed.search || parsed.hash) throw new Error('public session origin must be a canonical HTTPS origin');
+    publicOrigin = parsed.origin;
+  }
+  if (bindHost !== '127.0.0.1' && !publicOrigin) throw new Error('non-loopback session binding requires an explicit public origin');
+  const configuredLeaseMs = publicOrigin ? options.leaseMs ?? 15 * 60_000 : undefined;
+  if (configuredLeaseMs !== undefined && (!Number.isInteger(configuredLeaseMs) || configuredLeaseMs < 0 || configuredLeaseMs > 60 * 60_000)) {
+    throw new Error('session lease must be disabled or at most 1 hour');
+  }
+  const leaseMs = configuredLeaseMs === 0 ? undefined : configuredLeaseMs;
+  return { bindHost, ...(publicOrigin ? { publicOrigin } : {}), ...(leaseMs ? { leaseMs } : {}) };
+}
+
+function leaseCookie(header: string | undefined): string | undefined {
+  if (!header) return undefined;
+  const values = header.split(';').map((part) => part.trim()).filter((part) => part.startsWith('nanda_city_lease='));
+  if (values.length !== 1) return undefined;
+  const value = values[0]!.slice('nanda_city_lease='.length);
+  return /^[0-9a-f]{64}$/.test(value) ? value : undefined;
+}
+
+function waitingPage(seconds: number, resetting = false): string {
+  const title = resetting ? 'NANDA City is preparing a fresh session' : 'NANDA City is currently in use';
+  const detail = resetting ? 'The local chain and indexes are restarting. This page will retry automatically.' : `One visitor can run experiments at a time. Try again in about ${seconds} seconds.`;
+  const retry = resetting ? 5 : Math.min(seconds, 30);
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="refresh" content="${retry}"><title>${title}</title><style>body{font:16px/1.5 system-ui;max-width:42rem;margin:10vh auto;padding:1.5rem;color:#171717}button{font:inherit;padding:.6rem 1rem}</style><h1>${title}</h1><p>${detail}</p><button onclick="location.reload()">Try again</button></html>`;
+}
 async function readForm(req: IncomingMessage): Promise<Record<string, string>> {
   if (req.headers['content-type'] !== 'application/x-www-form-urlencoded' || req.headers['content-encoding']) throw new HttpFailure(400);
   if (Number(req.headers['content-length'] ?? 0) > MAX_BODY) throw new HttpFailure(413);
@@ -62,12 +99,16 @@ export function renderSessionPage(session: DemoSession, options: Omit<SessionRen
 }
 
 /** Server accepts an already configured fixture or licensed session. It never accepts its configuration. */
-export async function startSessionServer(session: DemoSession, port = 0): Promise<{ origin: string; close(): Promise<void> }> {
+export async function startSessionServer(session: DemoSession, port = 0, options: SessionServerOptions = {}): Promise<{
+  origin: string; browserOrigin: string; close(): Promise<void> }> {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('invalid local port');
+  const serverConfig = checkedServerOptions(options);
   let generation = session.view().generation, token = randomBytes(32).toString('hex');
   const submissions = new Map<string, string>();
   let resetSubmission: { id: string; serialized: string } | undefined;
-  let origin = '', closed: Promise<void> | undefined;
+  let origin = '', browserOrigin = '', closed: Promise<void> | undefined;
+  let lease: { token: string; expiresAt: number } | undefined;
+  let leaseReset: Promise<void> | undefined, leaseResetFailed = false;
   const rotate = () => { if (session.view().generation !== generation) { generation = session.view().generation;
     token = randomBytes(32).toString('hex'); submissions.clear(); resetSubmission = undefined; } };
   const server = createServer((req, res) => { void (async () => {
@@ -76,10 +117,38 @@ export async function startSessionServer(session: DemoSession, port = 0): Promis
     res.setHeader('referrer-policy', 'same-origin'); res.setHeader('x-frame-options', 'DENY');
     res.setHeader('content-security-policy', `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`);
     try {
-      if (req.headers.host !== origin.slice('http://'.length)) throw new HttpFailure(403);
+      if (req.headers.host !== new URL(browserOrigin).host) throw new HttpFailure(403);
       rotate();
-      const url = new URL(req.url ?? '/', origin);
-      if (url.origin !== origin) throw new HttpFailure(403);
+      const url = new URL(req.url ?? '/', browserOrigin);
+      if (url.origin !== browserOrigin) throw new HttpFailure(403);
+      if (req.method === 'GET' && url.pathname === '/healthz' && !url.search) {
+        const status = session.view().status;
+        res.statusCode = status === 'ready' ? 200 : 503;
+        res.setHeader('content-type', 'application/json');
+        return res.end(JSON.stringify({ status }));
+      }
+      if (serverConfig.leaseMs) {
+        const now = Date.now();
+        if (lease && now >= lease.expiresAt) {
+          lease = undefined; leaseResetFailed = false;
+          leaseReset ??= session.reset().catch(() => { leaseResetFailed = true; }).finally(() => { leaseReset = undefined; });
+        }
+        if (leaseReset || leaseResetFailed) {
+          res.statusCode = 503; res.setHeader('retry-after', '3'); res.setHeader('content-type', 'text/html; charset=utf-8');
+          return res.end(waitingPage(3, true));
+        }
+        const supplied = leaseCookie(req.headers.cookie);
+        if (!lease) {
+          if (req.method !== 'GET' || url.pathname !== '/' || url.search) throw new HttpFailure(403);
+          lease = { token: randomBytes(32).toString('hex'), expiresAt: now + serverConfig.leaseMs };
+          res.setHeader('set-cookie', `nanda_city_lease=${lease.token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${Math.ceil(serverConfig.leaseMs / 1000)}`);
+        } else if (!tokenMatches(supplied, lease.token)) {
+          if (req.method !== 'GET' || url.pathname !== '/' || url.search) throw new HttpFailure(403);
+          const seconds = Math.max(1, Math.ceil((lease.expiresAt - now) / 1000));
+          res.statusCode = 423; res.setHeader('retry-after', String(seconds)); res.setHeader('content-type', 'text/html; charset=utf-8');
+          return res.end(waitingPage(seconds));
+        }
+      }
       if (req.method === 'GET') {
         if (url.pathname === '/status') {
           const view = session.view(); res.setHeader('content-type', 'application/json');
@@ -95,7 +164,7 @@ export async function startSessionServer(session: DemoSession, port = 0): Promis
         res.setHeader('content-type', 'text/html; charset=utf-8'); return res.end(renderSessionPage(session, { token, nonce }));
       }
       if (req.method !== 'POST' || url.pathname !== '/action' || url.search) throw new HttpFailure(404);
-      if (req.headers.origin !== origin || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])))) throw new HttpFailure(403);
+      if (req.headers.origin !== browserOrigin || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])))) throw new HttpFailure(403);
       const form = await readForm(req); rotate();
       if (!tokenMatches(form.token, token) || form.generation !== String(generation)) throw new HttpFailure(403);
       const checked = actionSchema.safeParse(form); if (!checked.success) throw new HttpFailure(400);
@@ -154,21 +223,33 @@ export async function startSessionServer(session: DemoSession, port = 0): Promis
       const status = error instanceof HttpFailure ? error.status : 409;
       res.statusCode = status; res.setHeader('content-type', 'text/plain; charset=utf-8');
       res.end(status === 400 ? 'Input not accepted. Use the shown fields, selected city, future local dates with correct UTC offsets, a window of at most 24 hours and the admitted reviewer. Reload the page and check policy expiry. No request was queued.' :
-        status === 403 ? 'Local request refused. Open the exact 127.0.0.1 address printed by the launcher and reload the page.' :
+        status === 403 ? 'Request origin or active visitor lease refused. Open the exact URL printed by the launcher and reload the page.' :
         status === 413 ? 'Form exceeds the 16 KiB limit.' : 'Action unavailable or precondition changed. Reload the session; unknown outcomes remain unresolved.');
     }
   })().catch(() => { res.destroy(); }); });
   server.requestTimeout = 10000; server.headersTimeout = 10000;
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, serverConfig.bindHost, () => { server.off('error', reject); resolve(); }); });
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('local listener unavailable');
-  origin = new URL(`http://127.0.0.1:${address.port}`).origin;
-  return { origin, close: () => closed ??= new Promise<void>((resolve, reject) => { server.close((error) => error ? reject(error) : resolve()); server.closeAllConnections(); }) };
+  origin = new URL(`http://${serverConfig.bindHost}:${address.port}`).origin;
+  browserOrigin = serverConfig.publicOrigin ?? origin;
+  return { origin, browserOrigin, close: () => closed ??= new Promise<void>((resolve, reject) => { server.close((error) => error ? reject(error) : resolve()); server.closeAllConnections(); }) };
+}
+
+function serverOptionsFromEnv(env: NodeJS.ProcessEnv): SessionServerOptions {
+  const options: SessionServerOptions = {};
+  if (env['NANDA_CITY_BIND_HOST']) options.bindHost = env['NANDA_CITY_BIND_HOST'];
+  if (env['NANDA_CITY_PUBLIC_ORIGIN']) options.publicOrigin = env['NANDA_CITY_PUBLIC_ORIGIN'];
+  if (env['NANDA_CITY_LEASE_SECONDS']) {
+    if (!/^(0|[1-9][0-9]{0,3})$/.test(env['NANDA_CITY_LEASE_SECONDS'])) throw new Error('invalid session lease');
+    options.leaseMs = Number(env['NANDA_CITY_LEASE_SECONDS']) * 1000;
+  }
+  return options;
 }
 
 export async function runSessionDemo(indexCheckout: string, output: Pick<NodeJS.WriteStream, 'write'>, port = 0, options: SessionOptions = {}): Promise<void> {
   await withOwnedLifecycle(async (lifecycle) => withDemoSession(indexCheckout, async (session) => {
-    const server = await startSessionServer(session, port);
-    output.write(`NANDA City ${options.mode !== 'licensed' && options.answerEngine === 'openclaw' ? 'OpenClaw rehearsal (fictional data)' : 'fixture'}: ${server.origin}\nPreparing owned local resources. Ctrl-C closes the session and awaits cleanup.\n`);
+    const server = await startSessionServer(session, port, serverOptionsFromEnv(process.env));
+    output.write(`NANDA City ${options.mode !== 'licensed' && options.answerEngine === 'openclaw' ? 'OpenClaw rehearsal (fictional data)' : 'fixture'}: ${server.browserOrigin}\nPreparing owned local resources. Ctrl-C closes the session and awaits cleanup.\n`);
     try {
       await new Promise<void>((resolve) => { const stop = () => resolve();
         lifecycle.signal.addEventListener('abort', stop, { once: true }); if (lifecycle.signal.aborted) stop(); });
