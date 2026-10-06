@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { request, Server } from 'node:http';
 import test from 'node:test';
-import type { DemoSession, SessionAction, SessionView } from '../../src/demo/sessionController.js';
+import type { DemoSession, SessionAction, SessionOperation, SessionView } from '../../src/demo/sessionController.js';
 import { eveningPlanInputSchema } from '../../src/a2a/input.js';
 
 function state(): SessionView {
@@ -114,6 +114,111 @@ test('explicitly disabled public lease admits multiple browsers into the shared 
     assert.equal(first.status, 200); assert.equal(second.status, 200);
     assert.equal(first.cookie, undefined); assert.equal(second.cookie, undefined);
   } finally { await server.close(); }
+});
+
+test('browser session pool isolates journeys and restores a real Index fault before the next user action', async () => {
+  const { createSharedBrowserSessions } = await import('../../src/demo/sharedBrowserSessions.js');
+  const view = state();
+  const services = ['service-a', 'service-b'];
+  const operations = new Map<string, { view: { id: string; generation: number; kind: SessionAction['kind']; state: 'running' | 'completed' }; done: Promise<void> }>();
+  const selected: string[] = [], actions: string[] = []; let resets = 0;
+  const discovery = (city: 'Chicago' | 'Boston') => ({ city, status: 'complete', eligibleCount: 2,
+    selected: services.map((service, index) => ({ service, agent: { chainId: 31337, registry: '0x0000000000000000000000000000000000000001', agentId: String(index + 1) } })),
+    candidates: [], origins: [], ranking: { snapshot: 'matched', policyResult: null },
+    observation: { blockNumber: '1', blockHash: '0x00' } }) as unknown as NonNullable<SessionView['discovery']>;
+  const base: DemoSession = {
+    view: () => structuredClone(view), ready: async () => {}, readContent: () => undefined,
+    frozenInput: () => { throw new Error('not needed'); }, close: async () => {},
+    reset: async () => { resets++; },
+    select: (service) => { view.selection = service; selected.push(service); },
+    start: (action, id = 'id') => {
+      const item = { id, generation: 0, kind: action.kind, state: 'running' as const };
+      const done = new Promise<void>((resolve) => setImmediate(() => {
+        actions.push(action.kind === 'index' ? `${action.index}:${action.state}` : action.kind);
+        if (action.kind === 'refresh') view.discovery = discovery(action.city);
+        if (action.kind === 'invoke') view.invocations.push({ id, service: view.selection!, reviewer: action.reviewer,
+          requestDigest: '0x00', sent: true, accepted: true, taskId: id, outcome: 'completed', checkedResult: 'matched', answer: 'ok' });
+        if (action.kind === 'index') {
+          view.indexControls[action.index] = action.state === 'stop' ? 'offline' : action.state === 'tamper' ? 'altered' : 'online';
+          view.experiment = action.city ? { target: action.index, action: action.state, city: action.city, phase: 'observed', before: null,
+            after: { city: action.city, status: 'complete', indexes: { A: { status: action.index === 'A' && action.state === 'stop' ? 'unavailable' : 'complete', verified: 2, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] },
+              B: { status: 'complete', verified: 2, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] } }, services }, note: 'observed' } : null;
+        }
+        (item as { state: 'running' | 'completed' }).state = 'completed'; resolve();
+      }));
+      operations.set(id, { view: item, done }); return structuredClone(item);
+    },
+    wait: async (id) => { const operation = operations.get(id)!; await operation.done; return structuredClone(operation.view); },
+  };
+  const pool = createSharedBrowserSessions(base);
+  const first = pool.open('a'.repeat(64)), second = pool.open('b'.repeat(64));
+  const run = async (session: DemoSession, action: SessionAction, id: string) => session.wait(session.start(action, id).id);
+  try {
+    await Promise.all([run(first, { kind: 'refresh', city: 'Chicago' }, 'discover-a'),
+      run(second, { kind: 'refresh', city: 'Boston' }, 'discover-b')]);
+    first.select('service-a'); second.select('service-b');
+    await Promise.all([run(first, { kind: 'invoke', reviewer: 'accepted' }, 'ask-a'),
+      run(second, { kind: 'invoke', reviewer: 'accepted' }, 'ask-b')]);
+    assert.deepEqual(first.view().invocations.map((item) => [item.id, item.service]), [['ask-a', 'service-a']]);
+    assert.deepEqual(second.view().invocations.map((item) => [item.id, item.service]), [['ask-b', 'service-b']]);
+    await Promise.all([run(first, { kind: 'index', index: 'A', state: 'stop', city: 'Chicago' }, 'fault-a'),
+      run(second, { kind: 'refresh', city: 'Boston' }, 'after-fault')]);
+    assert.deepEqual(actions.slice(-3), ['A:stop', 'A:restart', 'refresh'], 'the shared Index is restored before another browser action runs');
+    assert.equal(first.view().experiment?.action, 'stop'); assert.equal(second.view().experiment, null);
+    await first.reset(); assert.equal(resets, 0, 'browser reset never resets shared infrastructure');
+    assert.equal(first.view().invocations.length, 0); assert.equal(second.view().invocations.length, 1);
+    assert.deepEqual(selected.slice(-2), ['service-a', 'service-b']);
+  } finally { await pool.close(); }
+});
+
+test('public HTTP assigns secure browser sessions and keeps their discovery views separate', async () => {
+  const { createSharedBrowserSessions } = await import('../../src/demo/sharedBrowserSessions.js');
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  const view = state(); const operations = new Map<string, SessionOperation>();
+  const base = { view: () => structuredClone(view), ready: async () => {}, select: () => {}, readContent: () => undefined,
+    frozenInput: () => { throw new Error(); }, reset: async () => {}, close: async () => {},
+    start: (action: SessionAction, id = 'id') => {
+      const operation: SessionOperation = { id, generation: 0, kind: action.kind, state: 'completed' };
+      if (action.kind === 'refresh') view.discovery = { city: action.city, status: 'complete', eligibleCount: 0, selected: [],
+        candidates: [], origins: [], ranking: { snapshot: 'matched', policyResult: null }, observation: { blockNumber: '1', blockHash: '0x00' } } as unknown as SessionView['discovery'];
+      operations.set(id, operation); return structuredClone(operation);
+    }, wait: async (id: string) => structuredClone(operations.get(id)!),
+  } as DemoSession;
+  const pool = createSharedBrowserSessions(base), publicOrigin = 'https://city.example';
+  const server = await startSessionServer(pool, 0, { publicOrigin, maxSessions: 4, sessionTtlMs: 60_000 });
+  const send = (path: string, method = 'GET', body = '', headers: Record<string, string> = {}) =>
+    new Promise<{ status: number; body: string; headers: import('node:http').IncomingHttpHeaders }>((resolve, reject) => {
+      const req = request(`${server.origin}${path}`, { method, headers: { host: 'city.example', ...headers } }, (res) => {
+        let text = ''; res.setEncoding('utf8'); res.on('data', (part) => text += part);
+        res.on('end', () => resolve({ status: res.statusCode!, body: text, headers: res.headers }));
+      }); req.on('error', reject); req.end(body);
+    });
+  const ready = async (cookie: string) => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const status = await send('/status', 'GET', '', { cookie });
+      if ((JSON.parse(status.body) as { operations: SessionOperation[] }).operations.every((item) => !['queued', 'running'].includes(item.state))) return;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.fail('browser operation did not settle');
+  };
+  try {
+    assert.equal((await send('/healthz')).status, 200);
+    const first = await send('/'), second = await send('/');
+    const firstCookie = first.headers['set-cookie']?.[0]?.split(';', 1)[0], secondCookie = second.headers['set-cookie']?.[0]?.split(';', 1)[0];
+    assert.match(firstCookie ?? '', /^nanda_city_session=[0-9a-f]{64}$/); assert.match(secondCookie ?? '', /^nanda_city_session=[0-9a-f]{64}$/);
+    assert.notEqual(firstCookie, secondCookie);
+    const firstToken = /name="token" value="([^"]+)"/.exec(first.body)![1]!, secondToken = /name="token" value="([^"]+)"/.exec(second.body)![1]!;
+    assert.notEqual(firstToken, secondToken);
+    const post = (cookie: string, token: string, city: 'Chicago' | 'Boston', id: string) => send('/action', 'POST',
+      new URLSearchParams({ token, generation: '0', operationId: id, action: 'refresh', city }).toString(),
+      { cookie, origin: publicOrigin, 'content-type': 'application/x-www-form-urlencoded' });
+    assert.equal((await post(firstCookie!, firstToken, 'Chicago', 'first-city')).status, 303);
+    assert.equal((await post(secondCookie!, secondToken, 'Boston', 'second-city')).status, 303);
+    await Promise.all([ready(firstCookie!), ready(secondCookie!)]);
+    assert.match((await send('/', 'GET', '', { cookie: firstCookie! })).body, /data-city="Chicago"/);
+    assert.match((await send('/', 'GET', '', { cookie: secondCookie! })).body, /data-city="Boston"/);
+    assert.equal((await post(secondCookie!, firstToken, 'Chicago', 'cross-user')).status, 403);
+  } finally { await server.close(); await pool.close(); }
 });
 
 test('expired public lease resets the owned session before a new visitor is admitted', async () => {

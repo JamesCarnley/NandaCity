@@ -72,9 +72,38 @@ prerequisites without blocking this demo or claiming a Town pass.
 Use **Reset this local session** to cancel work, await cleanup and acquire a fresh
 generation. The page shows starting/resetting states and GET refreshes never
 repeat a call. Ctrl-C waits for owned resource cleanup and stops the listener.
-Do not use shared or public hosting: this binds only `127.0.0.1`, validates
-Host/Origin and per-generation action tokens, and is a same-host demo rather than
-a multi-user security boundary. Do not remove unrelated Docker containers.
+By default this binds only `127.0.0.1`, validates Host/Origin and per-generation
+action tokens, and is a same-host demo. Do not remove unrelated Docker containers.
+
+### Bounded shared-fixture hosting
+
+The credential-free fixture has an explicit low-traffic HTTPS mode for a trusted
+demo group behind a reverse proxy. It keeps one owned chain, specialist pool and
+real Index pair, while assigning each browser a private journey, action token,
+discovery/selection history, A2A task mapping and reset boundary:
+
+```sh
+export NANDA_CITY_BIND_HOST=172.18.0.1
+export NANDA_CITY_PUBLIC_ORIGIN=https://city.example.org
+export NANDA_CITY_MAX_SESSIONS=12
+export NANDA_CITY_SESSION_SECONDS=3600
+npm run demo:session -- --index-checkout "$NANDA_INDEX_CHECKOUT" --port 39123
+```
+
+`NANDA_CITY_MAX_SESSIONS` must be 2–32 and requires the exact canonical HTTPS
+origin. `NANDA_CITY_SESSION_SECONDS` is an absolute 1-minute to 24-hour browser
+session lifetime. Cookies are random, Secure, HttpOnly and SameSite=Strict;
+cross-browser action tokens are rejected. The proxy is the only public listener:
+Anvil, PostgreSQL, Indexes, A2A services and Docker stay private.
+
+This mode does not clone the protocol infrastructure. Feedback and recovery are
+real shared-chain changes and therefore become visible to other browsers after a
+fresh read. Index fault actions are serialized: City applies the real stop or
+alteration, records that browser's verified observation, restores the Index, and
+only then admits the next browser mutation. The permanent stop-all-provider
+control is omitted; each browser can still run the signed provider-failure path.
+This is a bounded synthetic demo boundary, not general-purpose multi-tenant
+hosting. Licensed and OpenClaw modes intentionally reject the browser pool.
 
 Saved HTML/JSON are read-only public snapshots, without action tokens or mutation
 forms. Authored fixture answers remain exportable. Configured licensed sessions

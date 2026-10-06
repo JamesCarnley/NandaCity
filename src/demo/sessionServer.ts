@@ -7,6 +7,7 @@ import { eveningPlanInputSchema } from '../a2a/input.js';
 import { renderSessionView, type SessionRenderOptions } from '../report/sessionView.js';
 import { demoEveningInput, withDemoSession, type DemoSession, type SessionAction, type SessionOptions } from './sessionController.js';
 import { withOwnedLifecycle } from './ownedLifecycle.js';
+import { createSharedBrowserSessions, type DemoSessionPool } from './sharedBrowserSessions.js';
 
 const MAX_BODY = 16 * 1024;
 const operationId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
@@ -27,10 +28,12 @@ const actionSchema = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.enum(['reset', 'stop-providers', 'fresh-consumer', 'origin-comparison']) }),
 ]);
 class HttpFailure extends Error { constructor(readonly status: number) { super('Request refused'); } }
-export type SessionServerOptions = { bindHost?: string; publicOrigin?: string; leaseMs?: number };
+export type SessionServerOptions = { bindHost?: string; publicOrigin?: string; leaseMs?: number;
+  maxSessions?: number; sessionTtlMs?: number };
 
-function checkedServerOptions(options: SessionServerOptions): Required<Pick<SessionServerOptions, 'bindHost'>> &
-  Pick<SessionServerOptions, 'publicOrigin' | 'leaseMs'> {
+type CheckedSessionServerOptions = { bindHost: string; publicOrigin?: string; leaseMs?: number;
+  maxSessions?: number; sessionTtlMs?: number };
+function checkedServerOptions(options: SessionServerOptions): CheckedSessionServerOptions {
   const bindHost = options.bindHost ?? '127.0.0.1';
   if (isIP(bindHost) !== 4 || bindHost === '0.0.0.0') throw new Error('session bind host must be a specific IPv4 address');
   let publicOrigin: string | undefined;
@@ -41,20 +44,33 @@ function checkedServerOptions(options: SessionServerOptions): Required<Pick<Sess
     publicOrigin = parsed.origin;
   }
   if (bindHost !== '127.0.0.1' && !publicOrigin) throw new Error('non-loopback session binding requires an explicit public origin');
-  const configuredLeaseMs = publicOrigin ? options.leaseMs ?? 15 * 60_000 : undefined;
+  const maxSessions = options.maxSessions;
+  if (maxSessions !== undefined && (!publicOrigin || !Number.isInteger(maxSessions) || maxSessions < 2 || maxSessions > 32)) {
+    throw new Error('public browser session limit must be between 2 and 32');
+  }
+  const sessionTtlMs = maxSessions === undefined ? undefined : options.sessionTtlMs ?? 60 * 60_000;
+  if (sessionTtlMs !== undefined && (!Number.isInteger(sessionTtlMs) || sessionTtlMs < 60_000 || sessionTtlMs > 24 * 60 * 60_000)) {
+    throw new Error('browser session lifetime must be between 1 minute and 24 hours');
+  }
+  const configuredLeaseMs = publicOrigin ? maxSessions === undefined ? options.leaseMs ?? 15 * 60_000 : 0 : undefined;
   if (configuredLeaseMs !== undefined && (!Number.isInteger(configuredLeaseMs) || configuredLeaseMs < 0 || configuredLeaseMs > 60 * 60_000)) {
     throw new Error('session lease must be disabled or at most 1 hour');
   }
   const leaseMs = configuredLeaseMs === 0 ? undefined : configuredLeaseMs;
-  return { bindHost, ...(publicOrigin ? { publicOrigin } : {}), ...(leaseMs ? { leaseMs } : {}) };
+  return { bindHost, ...(publicOrigin ? { publicOrigin } : {}), ...(leaseMs ? { leaseMs } : {}),
+    ...(maxSessions === undefined ? {} : { maxSessions, sessionTtlMs: sessionTtlMs! }) };
 }
 
-function leaseCookie(header: string | undefined): string | undefined {
+function cookieValue(header: string | undefined, name: 'nanda_city_lease' | 'nanda_city_session'): string | undefined {
   if (!header) return undefined;
-  const values = header.split(';').map((part) => part.trim()).filter((part) => part.startsWith('nanda_city_lease='));
+  const values = header.split(';').map((part) => part.trim()).filter((part) => part.startsWith(`${name}=`));
   if (values.length !== 1) return undefined;
-  const value = values[0]!.slice('nanda_city_lease='.length);
+  const value = values[0]!.slice(name.length + 1);
   return /^[0-9a-f]{64}$/.test(value) ? value : undefined;
+}
+
+function isSessionPool(value: DemoSession | DemoSessionPool): value is DemoSessionPool {
+  return 'open' in value && 'status' in value;
 }
 
 function waitingPage(seconds: number, resetting = false): string {
@@ -98,19 +114,26 @@ export function renderSessionPage(session: DemoSession, options: Omit<SessionRen
   return html;
 }
 
-/** Server accepts an already configured fixture or licensed session. It never accepts its configuration. */
-export async function startSessionServer(session: DemoSession, port = 0, options: SessionServerOptions = {}): Promise<{
+type HttpSession = { session: DemoSession; generation: number; token: string; submissions: Map<string, string>;
+  resetSubmission: { id: string; serialized: string } | undefined; expiresAt: number };
+
+/** Server accepts an already configured fixture/licensed session or a bounded browser-session pool. */
+export async function startSessionServer(target: DemoSession | DemoSessionPool, port = 0, options: SessionServerOptions = {}): Promise<{
   origin: string; browserOrigin: string; close(): Promise<void> }> {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('invalid local port');
   const serverConfig = checkedServerOptions(options);
-  let generation = session.view().generation, token = randomBytes(32).toString('hex');
-  const submissions = new Map<string, string>();
-  let resetSubmission: { id: string; serialized: string } | undefined;
+  const pool = isSessionPool(target) ? target : undefined;
+  if (!!pool !== (serverConfig.maxSessions !== undefined)) throw new Error('browser session pool and server limits must be configured together');
+  const singleton: HttpSession | undefined = pool ? undefined : { session: target as DemoSession, generation: (target as DemoSession).view().generation,
+    token: randomBytes(32).toString('hex'), submissions: new Map<string, string>(), resetSubmission: undefined,
+    expiresAt: Number.POSITIVE_INFINITY };
+  const browsers = new Map<string, HttpSession>();
   let origin = '', browserOrigin = '', closed: Promise<void> | undefined;
   let lease: { token: string; expiresAt: number } | undefined;
   let leaseReset: Promise<void> | undefined, leaseResetFailed = false;
-  const rotate = () => { if (session.view().generation !== generation) { generation = session.view().generation;
-    token = randomBytes(32).toString('hex'); submissions.clear(); resetSubmission = undefined; } };
+  const rotate = (state: HttpSession) => { if (state.session.view().generation !== state.generation) {
+    state.generation = state.session.view().generation; state.token = randomBytes(32).toString('hex');
+    state.submissions.clear(); state.resetSubmission = undefined; } };
   const server = createServer((req, res) => { void (async () => {
     const nonce = randomBytes(18).toString('base64');
     res.setHeader('cache-control', 'no-store'); res.setHeader('x-content-type-options', 'nosniff');
@@ -118,15 +141,33 @@ export async function startSessionServer(session: DemoSession, port = 0, options
     res.setHeader('content-security-policy', `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`);
     try {
       if (req.headers.host !== new URL(browserOrigin).host) throw new HttpFailure(403);
-      rotate();
       const url = new URL(req.url ?? '/', browserOrigin);
       if (url.origin !== browserOrigin) throw new HttpFailure(403);
       if (req.method === 'GET' && url.pathname === '/healthz' && !url.search) {
-        const status = session.view().status;
+        const status = pool ? pool.status() : singleton!.session.view().status;
         res.statusCode = status === 'ready' ? 200 : 503;
         res.setHeader('content-type', 'application/json');
         return res.end(JSON.stringify({ status }));
       }
+      let active: HttpSession | undefined = singleton;
+      if (pool) {
+        const now = Date.now(), supplied = cookieValue(req.headers.cookie, 'nanda_city_session');
+        for (const [id, state] of browsers) if (now >= state.expiresAt) {
+          browsers.delete(id); void pool.drop(id).catch(() => {});
+        }
+        active = supplied ? browsers.get(supplied) : undefined;
+        if (!active) {
+          if (req.method !== 'GET' || url.pathname !== '/' || url.search) throw new HttpFailure(403);
+          if (browsers.size >= serverConfig.maxSessions!) throw new HttpFailure(429);
+          const id = randomBytes(32).toString('hex'), session = pool.open(id);
+          active = { session, generation: session.view().generation, token: randomBytes(32).toString('hex'),
+            submissions: new Map(), resetSubmission: undefined, expiresAt: now + serverConfig.sessionTtlMs! };
+          browsers.set(id, active);
+          res.setHeader('set-cookie', `nanda_city_session=${id}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${Math.ceil(serverConfig.sessionTtlMs! / 1000)}`);
+        }
+      }
+      const state = active!, session = state.session;
+      rotate(state);
       if (serverConfig.leaseMs) {
         const now = Date.now();
         if (lease && now >= lease.expiresAt) {
@@ -137,7 +178,7 @@ export async function startSessionServer(session: DemoSession, port = 0, options
           res.statusCode = 503; res.setHeader('retry-after', '3'); res.setHeader('content-type', 'text/html; charset=utf-8');
           return res.end(waitingPage(3, true));
         }
-        const supplied = leaseCookie(req.headers.cookie);
+        const supplied = cookieValue(req.headers.cookie, 'nanda_city_lease');
         if (!lease) {
           if (req.method !== 'GET' || url.pathname !== '/' || url.search) throw new HttpFailure(403);
           lease = { token: randomBytes(32).toString('hex'), expiresAt: now + serverConfig.leaseMs };
@@ -161,26 +202,26 @@ export async function startSessionServer(session: DemoSession, port = 0, options
           return res.end(url.pathname.endsWith('json') ? JSON.stringify(view, null, 2) : renderSessionView(view));
         }
         if (url.pathname !== '/') throw new HttpFailure(404);
-        res.setHeader('content-type', 'text/html; charset=utf-8'); return res.end(renderSessionPage(session, { token, nonce }));
+        res.setHeader('content-type', 'text/html; charset=utf-8'); return res.end(renderSessionPage(session, { token: state.token, nonce }));
       }
       if (req.method !== 'POST' || url.pathname !== '/action' || url.search) throw new HttpFailure(404);
       if (req.headers.origin !== browserOrigin || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])))) throw new HttpFailure(403);
-      const form = await readForm(req); rotate();
-      if (!tokenMatches(form.token, token) || form.generation !== String(generation)) throw new HttpFailure(403);
+      const form = await readForm(req); rotate(state);
+      if (!tokenMatches(form.token, state.token) || form.generation !== String(state.generation)) throw new HttpFailure(403);
       const checked = actionSchema.safeParse(form); if (!checked.success) throw new HttpFailure(400);
-      const value = checked.data, serialized = JSON.stringify(value), existing = submissions.get(value.operationId) ??
-        (resetSubmission?.id === value.operationId ? resetSubmission.serialized : undefined);
+      const value = checked.data, serialized = JSON.stringify(value), existing = state.submissions.get(value.operationId) ??
+        (state.resetSubmission?.id === value.operationId ? state.resetSubmission.serialized : undefined);
       if (existing !== undefined && existing !== serialized) throw new HttpFailure(409);
       if (existing === undefined) {
-        if (value.action !== 'reset' && submissions.size >= 512) throw new HttpFailure(429);
+        if (value.action !== 'reset' && state.submissions.size >= 512) throw new HttpFailure(429);
         if (value.action === 'reset') {
-          if (!resetSubmission) {
-            resetSubmission = { id: value.operationId, serialized };
+          if (!state.resetSubmission) {
+            state.resetSubmission = { id: value.operationId, serialized };
             // One reserved reset coalesces requests while the controller awaits cleanup.
             void session.reset().catch(() => {});
           }
         } else if (value.action === 'select') {
-          session.select(value.service); submissions.set(value.operationId, serialized);
+          session.select(value.service); state.submissions.set(value.operationId, serialized);
         } else {
           let action: SessionAction;
           if (value.action === 'invoke' || value.action === 'invoke-failure') {
@@ -215,15 +256,15 @@ export async function startSessionServer(session: DemoSession, port = 0, options
             const { token: _token, operationId: _id, generation: _generation, panel: _panel, action: kind, ...fields } = value;
             action = { kind, ...fields, ...(kind === 'feedback' ? { value: Number((value as { value: string }).value) } : {}) } as SessionAction;
           }
-          session.start(action, value.operationId); submissions.set(value.operationId, serialized);
+          session.start(action, value.operationId); state.submissions.set(value.operationId, serialized);
         }
       }
-      res.writeHead(303, { location: `/?operation=${encodeURIComponent(value.action === 'reset' ? resetSubmission!.id : value.operationId)}${value.panel ? `#${value.panel}` : ''}` }); res.end();
+      res.writeHead(303, { location: `/?operation=${encodeURIComponent(value.action === 'reset' ? state.resetSubmission!.id : value.operationId)}${value.panel ? `#${value.panel}` : ''}` }); res.end();
     } catch (error) {
       const status = error instanceof HttpFailure ? error.status : 409;
       res.statusCode = status; res.setHeader('content-type', 'text/plain; charset=utf-8');
       res.end(status === 400 ? 'Input not accepted. Use the shown fields, selected city, future local dates with correct UTC offsets, a window of at most 24 hours and the admitted reviewer. Reload the page and check policy expiry. No request was queued.' :
-        status === 403 ? 'Request origin or active visitor lease refused. Open the exact URL printed by the launcher and reload the page.' :
+        status === 403 ? 'Request origin or browser session refused. Open the exact URL printed by the launcher and reload the page.' :
         status === 413 ? 'Form exceeds the 16 KiB limit.' : 'Action unavailable or precondition changed. Reload the session; unknown outcomes remain unresolved.');
     }
   })().catch(() => { res.destroy(); }); });
@@ -232,7 +273,10 @@ export async function startSessionServer(session: DemoSession, port = 0, options
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('local listener unavailable');
   origin = new URL(`http://${serverConfig.bindHost}:${address.port}`).origin;
   browserOrigin = serverConfig.publicOrigin ?? origin;
-  return { origin, browserOrigin, close: () => closed ??= new Promise<void>((resolve, reject) => { server.close((error) => error ? reject(error) : resolve()); server.closeAllConnections(); }) };
+  return { origin, browserOrigin, close: () => closed ??= new Promise<void>((resolve, reject) => {
+    server.close((error) => { void (async () => { if (pool) await pool.close(); if (error) reject(error); else resolve(); })().catch(reject); });
+    server.closeAllConnections();
+  }) };
 }
 
 function serverOptionsFromEnv(env: NodeJS.ProcessEnv): SessionServerOptions {
@@ -243,12 +287,25 @@ function serverOptionsFromEnv(env: NodeJS.ProcessEnv): SessionServerOptions {
     if (!/^(0|[1-9][0-9]{0,3})$/.test(env['NANDA_CITY_LEASE_SECONDS'])) throw new Error('invalid session lease');
     options.leaseMs = Number(env['NANDA_CITY_LEASE_SECONDS']) * 1000;
   }
+  if (env['NANDA_CITY_MAX_SESSIONS']) {
+    if (!/^[1-9][0-9]?$/.test(env['NANDA_CITY_MAX_SESSIONS'])) throw new Error('invalid browser session limit');
+    options.maxSessions = Number(env['NANDA_CITY_MAX_SESSIONS']);
+  }
+  if (env['NANDA_CITY_SESSION_SECONDS']) {
+    if (!/^[1-9][0-9]{1,4}$/.test(env['NANDA_CITY_SESSION_SECONDS'])) throw new Error('invalid browser session lifetime');
+    options.sessionTtlMs = Number(env['NANDA_CITY_SESSION_SECONDS']) * 1000;
+  }
   return options;
 }
 
 export async function runSessionDemo(indexCheckout: string, output: Pick<NodeJS.WriteStream, 'write'>, port = 0, options: SessionOptions = {}): Promise<void> {
   await withOwnedLifecycle(async (lifecycle) => withDemoSession(indexCheckout, async (session) => {
-    const server = await startSessionServer(session, port, serverOptionsFromEnv(process.env));
+    const serverOptions = serverOptionsFromEnv(process.env);
+    if (serverOptions.maxSessions && (options.mode === 'licensed' || ('answerEngine' in options && options.answerEngine === 'openclaw'))) {
+      throw new Error('browser session pool is supported only for the credential-free fixture');
+    }
+    const target = serverOptions.maxSessions ? createSharedBrowserSessions(session) : session;
+    const server = await startSessionServer(target, port, serverOptions);
     output.write(`NANDA City ${options.mode !== 'licensed' && options.answerEngine === 'openclaw' ? 'OpenClaw rehearsal (fictional data)' : 'fixture'}: ${server.browserOrigin}\nPreparing owned local resources. Ctrl-C closes the session and awaits cleanup.\n`);
     try {
       await new Promise<void>((resolve) => { const stop = () => resolve();

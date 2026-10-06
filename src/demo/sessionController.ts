@@ -60,6 +60,7 @@ export type RecoveryCheck = { operatorId: string; city: City | null; status: 're
 
 export type SessionView = {
   mode: 'fixture' | 'licensed';
+  browserIsolation?: 'shared-fixture';
   answerEngine?: 'openclaw';
   licensedHint?: { admittedReviewer: 'accepted' | 'new'; expiresAt: string };
   freshConsumer: { status: 'matched' | 'different' | 'unavailable'; reason: string; observation: { blockNumber: string; blockHash: Hex } } | null;

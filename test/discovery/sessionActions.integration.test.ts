@@ -2,8 +2,48 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { withDemoSession } from '../../src/demo/sessionController.js';
 import { startSessionServer } from '../../src/demo/sessionServer.js';
+import { createSharedBrowserSessions } from '../../src/demo/sharedBrowserSessions.js';
 import childProcess, { type ChildProcess } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+
+test('one real fixture isolates browser journeys and restores Index faults between users', { timeout: 360000 }, async () => {
+  await withDemoSession(process.env.NANDA_INDEX_CHECKOUT!, async (base) => {
+    await base.ready();
+    const pool = createSharedBrowserSessions(base);
+    const chicago = pool.open('a'.repeat(64)), boston = pool.open('b'.repeat(64));
+    const run = async (session: typeof chicago, action: Parameters<typeof session.start>[0], id: string) =>
+      session.wait(session.start(action, id).id);
+    try {
+      await Promise.all([run(chicago, { kind: 'refresh', city: 'Chicago' }, 'chicago-discovery'),
+        run(boston, { kind: 'refresh', city: 'Boston' }, 'boston-discovery')]);
+      assert.equal(chicago.view().discovery?.city, 'Chicago');
+      assert.equal(boston.view().discovery?.city, 'Boston');
+      chicago.select(chicago.view().discovery!.selected[0]!.service);
+      boston.select(boston.view().discovery!.selected[1]!.service);
+      await Promise.all([run(chicago, { kind: 'invoke', reviewer: 'accepted' }, 'chicago-ask'),
+        run(boston, { kind: 'invoke', reviewer: 'accepted' }, 'boston-ask')]);
+      assert.deepEqual(chicago.view().invocations.map((item) => item.id), ['chicago-ask']);
+      assert.deepEqual(boston.view().invocations.map((item) => item.id), ['boston-ask']);
+      assert.notEqual(chicago.view().invocations[0]!.taskId, boston.view().invocations[0]!.taskId,
+        'specialist requests must retain distinct A2A tasks');
+
+      const [fault, otherRead] = await Promise.all([
+        run(chicago, { kind: 'index', index: 'A', state: 'stop', city: 'Chicago' }, 'chicago-fault'),
+        run(boston, { kind: 'refresh', city: 'Boston' }, 'boston-after-fault'),
+      ]);
+      assert.equal(fault.state, 'completed'); assert.equal(otherRead.state, 'completed');
+      assert.equal(chicago.view().experiment?.after?.indexes.A.status, 'unavailable');
+      assert.equal(chicago.view().experiment?.after?.indexes.B.verified, 3);
+      assert.equal(chicago.view().indexControls.A, 'online', 'public view must show the post-observation restore');
+      assert.equal(boston.view().experiment, null); assert.equal(boston.view().discovery?.city, 'Boston');
+      assert.equal(base.view().indexControls.A, 'online', 'the shared real Index must be restored before the other browser read');
+
+      await chicago.reset();
+      assert.equal(chicago.view().invocations.length, 0);
+      assert.equal(boston.view().invocations.length, 1, 'one browser reset cannot clear another browser journey');
+    } finally { await pool.close(); }
+  });
+});
 
 test('Index experiments invalidate old discovery and report fresh verified observations', { timeout: 360000 }, async () => {
   await withDemoSession(process.env.NANDA_INDEX_CHECKOUT!, async (session) => {
