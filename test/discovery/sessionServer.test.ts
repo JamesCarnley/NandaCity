@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { request, Server } from 'node:http';
 import test from 'node:test';
 import type { DemoSession, SessionAction, SessionOperation, SessionView } from '../../src/demo/sessionController.js';
+import type { DemoSessionPool } from '../../src/demo/sharedBrowserSessions.js';
 import { eveningPlanInputSchema } from '../../src/a2a/input.js';
 
 function state(): SessionView {
@@ -10,6 +11,54 @@ function state(): SessionView {
     indexControls: { A: 'online', B: 'online' }, indexRead: null, experiment: null,
     feedbackCapacity: { total: 16, used: 0, exhausted: false }, limitations: [] };
 }
+test('a full public demo gives a usable retry page without admitting another browser', async () => {
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  let admitted = 0;
+  const session = { view: state, readContent: () => undefined } as unknown as DemoSession;
+  const pool: DemoSessionPool = { status: () => 'ready', open: () => { admitted++; return session; },
+    drop: async () => {}, close: async () => {} };
+  const server = await startSessionServer(pool, 0, { publicOrigin: 'https://city.example', maxSessions: 2, sessionTtlMs: 60_000 });
+  const get = () => new Promise<{ status: number; body: string; headers: import('node:http').IncomingHttpHeaders }>((resolve, reject) => {
+    const req = request(server.origin, { headers: { host: 'city.example' } }, (res) => {
+      let body = ''; res.setEncoding('utf8'); res.on('data', (part) => body += part);
+      res.on('end', () => resolve({ status: res.statusCode!, body, headers: res.headers }));
+    }); req.on('error', reject); req.end();
+  });
+  try {
+    assert.equal((await get()).status, 200); assert.equal((await get()).status, 200);
+    const full = await get();
+    assert.equal(full.status, 429); assert.equal(admitted, 2);
+    assert.match(full.headers['content-type'] ?? '', /text\/html/);
+    assert.ok(Number(full.headers['retry-after']) >= 1);
+    assert.match(full.body, /demo browser slots are in use/i);
+    assert.match(full.body, /<form method="get" action="\/">[^]*?<button[^>]*>Try again<\/button><\/form>/);
+    assert.equal(full.body.includes('Action unavailable or precondition changed'), false);
+  } finally { await server.close(); }
+});
+
+test('saturated shared mutation admission explains that no action was queued', async () => {
+  const { startSessionServer } = await import('../../src/demo/sessionServer.js');
+  const session = { view: state, readContent: () => undefined,
+    start: () => { throw new Error('Shared demo is busy; wait for a pending action to finish, then retry.'); } } as unknown as DemoSession;
+  const pool: DemoSessionPool = { status: () => 'ready', open: () => session, drop: async () => {}, close: async () => {} };
+  const server = await startSessionServer(pool, 0, { publicOrigin: 'https://city.example', maxSessions: 2, sessionTtlMs: 60_000 });
+  const send = (method: string, body = '', cookie = '') => new Promise<{ status: number; body: string; headers: import('node:http').IncomingHttpHeaders }>((resolve, reject) => {
+    const req = request(server.origin + (method === 'POST' ? '/action' : '/'), { method, headers: { host: 'city.example',
+      ...(cookie ? { cookie } : {}), ...(method === 'POST' ? { origin: 'https://city.example', 'content-type': 'application/x-www-form-urlencoded' } : {}) } }, (res) => {
+      let text = ''; res.setEncoding('utf8'); res.on('data', (part) => text += part);
+      res.on('end', () => resolve({ status: res.statusCode!, body: text, headers: res.headers }));
+    }); req.on('error', reject); req.end(body);
+  });
+  try {
+    const page = await send('GET'), cookie = page.headers['set-cookie']![0]!.split(';', 1)[0]!;
+    const token = /name="token" value="([^"]+)"/.exec(page.body)![1]!;
+    const form = new URLSearchParams({ token, generation: '0', operationId: 'busy-action', action: 'refresh', city: 'Chicago' }).toString();
+    const busy = await send('POST', form, cookie);
+    assert.equal(busy.status, 409); assert.equal(busy.headers['retry-after'], '3');
+    assert.match(busy.body, /shared demo is busy/i); assert.match(busy.body, /no action was queued/i);
+    assert.equal(busy.body.includes('precondition changed'), false);
+  } finally { await server.close(); }
+});
 test('loopback HTTP boundary rejects foreign requests and preserves one operation across duplicate POST and read refresh', async () => {
   const api = await import('../../src/demo/sessionServer.js').catch(() => undefined);
   assert.ok(api?.startSessionServer, 'loopback session server must exist');

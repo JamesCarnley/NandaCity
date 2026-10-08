@@ -58,7 +58,7 @@ export type SessionFixture = {
   recover: (operatorId: string, signal: AbortSignal) => Promise<SessionRecovery>;
 };
 type ExecutorFactory = (service: { operatorId: string; city: City; emphasis: FixtureEmphasis }) => RuntimeExecutor<CityRequest>;
-export type SessionFixtureOptions = { mode?: 'fixture'; executor?: ExecutorFactory; answerEngine?: 'openclaw'; executionTimeoutMs?: number } |
+export type SessionFixtureOptions = { mode?: 'fixture'; executor?: ExecutorFactory; answerEngine?: 'openclaw'; executionTimeoutMs?: number; feedbackCapacity?: number } |
   { mode: 'licensed'; executor: ExecutorFactory; retention: LicensedRetention; admittedReviewer: 'accepted' | 'new' };
 
 async function close(server: Server): Promise<void> {
@@ -107,6 +107,8 @@ export async function waitSessionIndexes(fixture: Pick<SessionFixture, 'origins'
 /** Generated keys, one owned chain, two disposable databases. Existing fixtures are unchanged. */
 export async function withSessionFixture<T>(checkout: string, signal: AbortSignal,
   run: (fixture: SessionFixture) => Promise<T>, options: SessionFixtureOptions = {}): Promise<T> {
+  const feedbackCapacity = options.mode === 'licensed' ? SESSION_FEEDBACK_CAPACITY : options.feedbackCapacity ?? SESSION_FEEDBACK_CAPACITY;
+  if (!Number.isInteger(feedbackCapacity) || feedbackCapacity < 1 || feedbackCapacity > 64) throw new Error('invalid fixture feedback capacity');
   return withOwnedLifecycle(async ({ signal }) => {
     const root = await mkdtemp(join(await realpath(tmpdir()), 'nandacity-session-'));
     const cards = new Map<string, Uint8Array>(); const documents = new Map<string, Uint8Array>();
@@ -121,7 +123,7 @@ export async function withSessionFixture<T>(checkout: string, signal: AbortSigna
         const bytes = request.method === 'GET' ? documents.get(request.url ?? '') : undefined;
         response.statusCode = bytes ? 200 : 404; response.setHeader('content-type', 'application/octet-stream'); response.end(bytes);
       }); servers.push(documentServer); const documentOrigin = await listenOwnedServer(documentServer);
-      const urls = Array.from({ length: SESSION_FEEDBACK_CAPACITY }, (_, i) => `${documentOrigin}/feedback/${i}`);
+      const urls = Array.from({ length: feedbackCapacity }, (_, i) => `${documentOrigin}/feedback/${i}`);
       const owned = await withOwnedAnvil(async (rpcOrigin) => {
         const transport = http(rpcOrigin, { retryCount: 0, timeout: 5000, fetchFn: boundRpcFetch(ownedFetch) });
         const chain = createPublicClient({ transport, pollingInterval: 25, cacheTime: 0 });

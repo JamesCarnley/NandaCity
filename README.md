@@ -105,6 +105,20 @@ control is omitted; each browser can still run the signed provider-failure path.
 This is a bounded synthetic demo boundary, not general-purpose multi-tenant
 hosting. Licensed and OpenClaw modes intentionally reject the browser pool.
 
+The hosted launcher reserves 64 immutable feedback slots for the whole host
+generation (the single-user default remains eight). Recovery can run once per
+operator. Browser reset clears only that visitor's journey; it does not erase
+reviews, replenish slots or undo recovery. When slots are exhausted, discovery
+and invocation still work. The host owner can restart City between demonstrations
+to create a fresh private chain, which discards all demo history and browser
+sessions. Do not restart while visitors are using it without warning them.
+
+Only one pending mutation per browser and 12 across the pool are admitted.
+If automatic Index restoration fails, all new/queued mutations stop and health
+reports failure. Inspect the host and restart its owned City service before
+resuming; browser reset is not infrastructure repair. A full browser pool shows
+a retry page rather than admitting an unbounded number of visitors.
+
 Saved HTML/JSON are read-only public snapshots, without action tokens or mutation
 forms. Authored fixture answers remain exportable. Configured licensed sessions
 can use the same server API, with bounded transient display, intact attribution,

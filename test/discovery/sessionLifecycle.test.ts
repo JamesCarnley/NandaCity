@@ -2,6 +2,26 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
 import { withOwnedLifecycle, ownedFetch } from '../../src/demo/ownedLifecycle.js';
+import { demoEveningInput, withDemoSession } from '../../src/demo/sessionController.js';
+import { syntheticEveningPlan } from '../../src/a2a/answer.js';
+
+test('the hosted evening brief carries the two-person $150 budget into its authored answer', () => {
+  for (const city of ['Chicago', 'Boston'] as const) {
+    const input = demoEveningInput(city);
+    const answer = JSON.parse(new TextDecoder().decode(syntheticEveningPlan({ input }, 'culture')));
+    assert.equal(answer.budget.requestedMinorUnits, '15000');
+    assert.ok(input.preferences.includes('Plan for two people'));
+  }
+});
+
+test('fixture feedback capacity refuses unbounded configuration before resource acquisition', async () => {
+  for (const feedbackCapacity of [0, 65, 1.5]) {
+    let acquired = false;
+    await assert.rejects(withDemoSession('/not-a-checkout', async () => { acquired = true; },
+      { feedbackCapacity } as Parameters<typeof withDemoSession>[2]));
+    assert.equal(acquired, false);
+  }
+});
 
 test('nested session cancellation propagates to physical reads and awaits lexical cleanup', { timeout: 3000 }, async () => {
   let entered!: () => void; let closed!: () => void; let release!: () => void;

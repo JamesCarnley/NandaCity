@@ -91,6 +91,7 @@ export type SessionOptions = Extract<SessionFixtureOptions, { mode?: 'fixture' }
 const callable = z.custom<(...args: never[]) => unknown>((value) => typeof value === 'function');
 const optionsSchema = z.union([
   z.strictObject({ mode: z.literal('fixture').optional(), executor: callable.optional(), answerEngine: z.literal('openclaw').optional(),
+    feedbackCapacity: z.number().int().min(1).max(64).optional(),
     executionTimeoutMs: z.number().int().min(1000).max(60000).optional() }).refine((o) => !o.answerEngine || !!o.executor),
   z.strictObject({ mode: z.literal('licensed'), retention: licensedRetentionSchema, admittedReviewer: z.enum(['accepted', 'new']),
     transport: z.custom<TransportConfig>(), budgetDirectory: z.string().min(1),
@@ -145,8 +146,8 @@ export function demoEveningInput(city: City): EveningPlanInput {
   return { version: '0.1', capability: 'evening-plan', city,
     timeWindow: { start: city === 'Chicago' ? '2026-10-02T18:00:00-05:00' : '2026-10-02T18:00:00-04:00',
       end: city === 'Chicago' ? '2026-10-02T22:00:00-05:00' : '2026-10-02T22:00:00-04:00', timeZone: city === 'Chicago' ? 'America/Chicago' : 'America/New_York' },
-    area: city === 'Chicago' ? 'The Loop' : 'Back Bay', budget: { currency: 'USD', minorUnits: '8500' },
-    transport: ['walk', 'public-transit'], preferences: ['Interactive fixture example'] };
+    area: city === 'Chicago' ? 'The Loop' : 'Back Bay', budget: { currency: 'USD', minorUnits: '15000' },
+    transport: ['walk', 'public-transit'], preferences: ['Interactive fixture example', 'Plan for two people'] };
 }
 
 /** Callback receives a status reader immediately, before chain/Index acquisition. */
@@ -154,6 +155,7 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
   supplied: SessionOptions = {}): Promise<T> {
   const options = optionsSchema.parse(supplied) as SessionOptions;
   const mode = options.mode ?? 'fixture';
+  const feedbackCapacity = options.mode === 'licensed' ? SESSION_FEEDBACK_CAPACITY : options.feedbackCapacity ?? SESSION_FEEDBACK_CAPACITY;
   let ledger: LiveBudget | undefined; let fixtureOptions: SessionFixtureOptions;
   if (options.mode === 'licensed') {
     if (Date.parse(options.retention.expiresAt) <= Date.now()) throw new Error('licensed policy expired');
@@ -172,7 +174,7 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
     freshConsumer: null, originComparison: null, generation, status: 'starting', lifecycleOperationId: randomUUID(), operators: [], crossOperatorWrite: 'not-tested',
     invocations: [], discovery: null, selection: null, operations: [], feedback: [], indexControls: { A: 'online', B: 'online' },
     indexRead: null, experiment: null, recoveryCheck: null,
-    feedbackCapacity: { total: SESSION_FEEDBACK_CAPACITY, used: 0, exhausted: false }, limitations: [
+    feedbackCapacity: { total: feedbackCapacity, used: 0, exhausted: false }, limitations: [
       mode === 'fixture' ? 'Synthetic fixture answers, three simulated operators and generated 1-of-2 EOA Safes on one host; not independent custody or real city facts.' :
         'Source-backed licensed mode with three simulated operators and generated 1-of-2 EOA Safes on one host. Owned-test inference is not live utility, terms clearance or independent custody.',
       ...(options.mode !== 'licensed' && options.answerEngine === 'openclaw' ? [
@@ -349,7 +351,8 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
         agentUriDigest: source.agentUriDigest.toLowerCase(), registrationDigest: source.registrationDigest.toLowerCase(),
         cardDigest: source.cardDigest.toLowerCase(), receiptSigner: profile.registration['x-nandacity'].receiptSigner.toLowerCase() },
       input: options.mode === 'licensed' ? action.input! : options.answerEngine === 'openclaw' && action.input && !action.fail ? action.input :
-        { ...demoEveningInput(city), preferences: [action.fail ? 'Trigger provider fault' : 'Interactive fixture example'] } }, caller);
+        { ...demoEveningInput(city), preferences: [...demoEveningInput(city).preferences,
+          ...(action.fail ? ['Trigger provider fault'] : [])] } }, caller);
     const params = { message: { kind: 'message', role: 'user', messageId: randomUUID(), parts: [{ kind: 'data',
       data: { type: CITY_REQUEST_DATA_TYPE, version: '0.1', envelope: request } }] }, configuration: { blocking: false, acceptedOutputModes: ['application/json'] } };
     const entry: PrivateInvocation = { view: { id, service: chosen.service, reviewer: action.reviewer,
@@ -481,7 +484,7 @@ export async function withDemoSession<T>(indexCheckout: string, run: (session: D
     }
     if (state.feedbackCapacity.exhausted) throw new Error('immutable feedback slot capacity exhausted');
     const slot = state.feedbackCapacity.used++;
-    state.feedbackCapacity.exhausted = state.feedbackCapacity.used === SESSION_FEEDBACK_CAPACITY;
+    state.feedbackCapacity.exhausted = state.feedbackCapacity.used === feedbackCapacity;
     const bundle = encodeSupportingBundle({ version: '0.1', request: evidence.request, acceptance: evidence.acceptance,
       completion: evidence.completion, cardBase64: evidence.cardBase64 });
     const request = decodeEnvelope(evidence.request).statement, acceptance = decodeEnvelope(evidence.acceptance).statement,

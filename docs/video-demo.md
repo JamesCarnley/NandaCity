@@ -14,6 +14,15 @@ not an official NANDA release.
 
 ## Start
 
+For the hosted credential-free demo, use its HTTPS link and start at **What is
+City?** It runs authored fictional answers, not OpenClaw reasoning or live APIs.
+The $150-for-two brief is fixed in this mode. Browser journeys are separate,
+but the private development chain, feedback capacity and one-shot operator
+recovery are shared. Index faults are real, observed, then automatically restored.
+Public access to this website does not make its Ethereum chain public or prove
+independent operator custody. A short hosted tour should show Discover → Ask →
+signed stages → Reputation → temporary Index outage, with these limits stated.
+
 Follow [the setup prerequisites](../README.md#setup-and-checks). The credential-free
 launcher is `npm run demo:session`. For real reasoning, first configure the
 [isolated OpenClaw roster](../runtime/openclaw/README.md), then run:

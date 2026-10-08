@@ -27,7 +27,8 @@ const actionSchema = z.discriminatedUnion('action', [
   z.strictObject({ ...common, action: z.literal('recover'), operatorId: z.enum(['operator-1', 'operator-2', 'operator-3']) }),
   z.strictObject({ ...common, action: z.enum(['reset', 'stop-providers', 'fresh-consumer', 'origin-comparison']) }),
 ]);
-class HttpFailure extends Error { constructor(readonly status: number) { super('Request refused'); } }
+class HttpFailure extends Error { constructor(readonly status: number, readonly reason?: 'browser-capacity' | 'action-capacity',
+  readonly retryAfter?: number) { super('Request refused'); } }
 export type SessionServerOptions = { bindHost?: string; publicOrigin?: string; leaseMs?: number;
   maxSessions?: number; sessionTtlMs?: number };
 
@@ -77,7 +78,10 @@ function waitingPage(seconds: number, resetting = false): string {
   const title = resetting ? 'NANDA City is preparing a fresh session' : 'NANDA City is currently in use';
   const detail = resetting ? 'The local chain and indexes are restarting. This page will retry automatically.' : `One visitor can run experiments at a time. Try again in about ${seconds} seconds.`;
   const retry = resetting ? 5 : Math.min(seconds, 30);
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="refresh" content="${retry}"><title>${title}</title><style>body{font:16px/1.5 system-ui;max-width:42rem;margin:10vh auto;padding:1.5rem;color:#171717}button{font:inherit;padding:.6rem 1rem}</style><h1>${title}</h1><p>${detail}</p><button onclick="location.reload()">Try again</button></html>`;
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="refresh" content="${retry}"><title>${title}</title><style>body{font:16px/1.5 system-ui;max-width:42rem;margin:10vh auto;padding:1.5rem;color:#171717}button{font:inherit;padding:.6rem 1rem}</style><h1>${title}</h1><p>${detail}</p><form method="get" action="/"><button>Try again</button></form></html>`;
+}
+function capacityPage(seconds: number): string {
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>NANDA City demo is full</title><style>body{font:16px/1.5 system-ui;max-width:42rem;margin:10vh auto;padding:1.5rem;color:#171717}button{font:inherit;padding:.6rem 1rem}</style><h1>All demo browser slots are in use</h1><p>Each visitor gets a temporary browser journey over shared demo resources. No new journey was opened for you. Try again in about ${seconds} seconds; a slot opens when an existing journey expires.</p><form method="get" action="/"><button>Try again</button></form></html>`;
 }
 async function readForm(req: IncomingMessage): Promise<Record<string, string>> {
   if (req.headers['content-type'] !== 'application/x-www-form-urlencoded' || req.headers['content-encoding']) throw new HttpFailure(400);
@@ -158,7 +162,10 @@ export async function startSessionServer(target: DemoSession | DemoSessionPool, 
         active = supplied ? browsers.get(supplied) : undefined;
         if (!active) {
           if (req.method !== 'GET' || url.pathname !== '/' || url.search) throw new HttpFailure(403);
-          if (browsers.size >= serverConfig.maxSessions!) throw new HttpFailure(429);
+          if (browsers.size >= serverConfig.maxSessions!) {
+            const nextExpiry = Math.min(...[...browsers.values()].map((state) => state.expiresAt));
+            throw new HttpFailure(429, 'browser-capacity', Math.max(1, Math.min(30, Math.ceil((nextExpiry - now) / 1000))));
+          }
           const id = randomBytes(32).toString('hex'), session = pool.open(id);
           active = { session, generation: session.view().generation, token: randomBytes(32).toString('hex'),
             submissions: new Map(), resetSubmission: undefined, expiresAt: now + serverConfig.sessionTtlMs! };
@@ -213,7 +220,7 @@ export async function startSessionServer(target: DemoSession | DemoSessionPool, 
         (state.resetSubmission?.id === value.operationId ? state.resetSubmission.serialized : undefined);
       if (existing !== undefined && existing !== serialized) throw new HttpFailure(409);
       if (existing === undefined) {
-        if (value.action !== 'reset' && state.submissions.size >= 512) throw new HttpFailure(429);
+        if (value.action !== 'reset' && state.submissions.size >= 512) throw new HttpFailure(429, 'action-capacity');
         if (value.action === 'reset') {
           if (!state.resetSubmission) {
             state.resetSubmission = { id: value.operationId, serialized };
@@ -262,7 +269,23 @@ export async function startSessionServer(target: DemoSession | DemoSessionPool, 
       res.writeHead(303, { location: `/?operation=${encodeURIComponent(value.action === 'reset' ? state.resetSubmission!.id : value.operationId)}${value.panel ? `#${value.panel}` : ''}` }); res.end();
     } catch (error) {
       const status = error instanceof HttpFailure ? error.status : 409;
+      if (error instanceof HttpFailure && error.reason === 'browser-capacity') {
+        const retryAfter = error.retryAfter ?? 30;
+        res.statusCode = 429; res.setHeader('retry-after', String(retryAfter)); res.setHeader('content-type', 'text/html; charset=utf-8');
+        return res.end(capacityPage(retryAfter));
+      }
+      const busy = pool && error instanceof Error && (
+        error.message === 'Shared demo is busy; wait for a pending action to finish, then retry.' ||
+        error.message === 'This browser already has a pending action; wait for it to finish, then retry.');
+      if (busy) res.setHeader('retry-after', '3');
       res.statusCode = status; res.setHeader('content-type', 'text/plain; charset=utf-8');
+      if (busy) return res.end(`${error.message} No action was queued; return to the demo and retry after the pending action finishes.`);
+      if (pool && error instanceof Error && error.message === 'Shared demo is recovering from an Index restore failure; mutations are paused until host repair or restart.') {
+        return res.end('Shared demo is paused because Index restoration was not verified. No action was queued. Please wait for host repair; reloading this browser cannot restore the shared Index.');
+      }
+      if (error instanceof HttpFailure && error.reason === 'action-capacity') {
+        return res.end('This browser journey reached its operation limit. No action was queued. Save your evidence and reset your browser journey to continue; shared feedback slots and one-shot recoveries are not replenished by browser reset.');
+      }
       res.end(status === 400 ? 'Input not accepted. Use the shown fields, selected city, future local dates with correct UTC offsets, a window of at most 24 hours and the admitted reviewer. Reload the page and check policy expiry. No request was queued.' :
         status === 403 ? 'Request origin or browser session refused. Open the exact URL printed by the launcher and reload the page.' :
         status === 413 ? 'Form exceeds the 16 KiB limit.' : 'Action unavailable or precondition changed. Reload the session; unknown outcomes remain unresolved.');
@@ -299,11 +322,14 @@ function serverOptionsFromEnv(env: NodeJS.ProcessEnv): SessionServerOptions {
 }
 
 export async function runSessionDemo(indexCheckout: string, output: Pick<NodeJS.WriteStream, 'write'>, port = 0, options: SessionOptions = {}): Promise<void> {
+  const serverOptions = serverOptionsFromEnv(process.env);
+  checkedServerOptions(serverOptions);
+  if (serverOptions.maxSessions && (options.mode === 'licensed' || options.answerEngine === 'openclaw')) {
+    throw new Error('browser session pool is supported only for the credential-free fixture');
+  }
+  const sessionOptions: SessionOptions = serverOptions.maxSessions && options.mode !== 'licensed' ?
+    { ...options, feedbackCapacity: 64 } : options;
   await withOwnedLifecycle(async (lifecycle) => withDemoSession(indexCheckout, async (session) => {
-    const serverOptions = serverOptionsFromEnv(process.env);
-    if (serverOptions.maxSessions && (options.mode === 'licensed' || ('answerEngine' in options && options.answerEngine === 'openclaw'))) {
-      throw new Error('browser session pool is supported only for the credential-free fixture');
-    }
     const target = serverOptions.maxSessions ? createSharedBrowserSessions(session) : session;
     const server = await startSessionServer(target, port, serverOptions);
     output.write(`NANDA City ${options.mode !== 'licensed' && options.answerEngine === 'openclaw' ? 'OpenClaw rehearsal (fictional data)' : 'fixture'}: ${server.browserOrigin}\nPreparing owned local resources. Ctrl-C closes the session and awaits cleanup.\n`);
@@ -311,5 +337,5 @@ export async function runSessionDemo(indexCheckout: string, output: Pick<NodeJS.
       await new Promise<void>((resolve) => { const stop = () => resolve();
         lifecycle.signal.addEventListener('abort', stop, { once: true }); if (lifecycle.signal.aborted) stop(); });
     } finally { await server.close(); }
-  }, options));
+  }, sessionOptions));
 }

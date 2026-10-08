@@ -131,7 +131,10 @@ fetches AgentCards only from its own exact loopback origin/paths; arbitrary
 external card fetching is not supported. Index rows are candidates, not authority.
 Public-chain writes and deployed A2A service operation remain outside this
 boundary. The legacy static HTML report remains a read-only artifact; the local
-session UI is not public hosting or a multi-user security boundary. The loopback task service implements only
+session UI defaults to loopback. The explicit shared-fixture HTTPS mode adds
+bounded browser journeys over shared owned infrastructure; it is not a
+general-purpose multi-tenant security boundary. See README hosting limits.
+The loopback task service implements only
 `message/send` and `tasks/get`; body signatures do not authorize polling, and
 the subset is not a complete A2A implementation.
 The journey JSON retains original evidence, but its stopped ephemeral Anvil is

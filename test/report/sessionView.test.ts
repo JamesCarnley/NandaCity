@@ -52,6 +52,47 @@ function discoveredView(snapshot: 'unavailable' | 'changed'): SessionView {
 const active = { token: 'test-token', nonce: 'test-nonce' };
 const actionForm = (html: string, action: string) => html.match(/<form\b[^]*?<\/form>/g)?.find((form) => form.includes(`name="action" value="${action}"`));
 
+test('shared restored Index map separates current state from the last outage observation', () => {
+  const view = emptyView(); view.browserIsolation = 'shared-fixture';
+  view.indexRead = { city: 'Chicago', status: 'partial', indexes: {
+    A: { status: 'unavailable', verified: 0, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] },
+    B: { status: 'complete', verified: 3, rejected: 0, unavailable: 0, alteredNames: [], reasons: [] } }, services: ['a', 'b', 'c'] };
+  const html = renderSessionView(view, active);
+  const node = /<a class="map-node index-node"[^>]*data-focus-key="index-A"[^>]*>([^]*?)<\/a>/.exec(html)?.[1];
+  assert.ok(node);
+  assert.match(node, /Current: online/);
+  assert.match(node, /Last comparison: unavailable · 0 verified/);
+  assert.equal(node.includes('online · unavailable'), false);
+  assert.match(html, /data-route-index="A" data-route-state="not-compared"/);
+});
+
+test('shared fixture brief and finite feedback and recovery limits are visible beside controls', () => {
+  const view = discoveredView('unavailable'); view.browserIsolation = 'shared-fixture';
+  view.feedbackCapacity = { total: 8, used: 7, exhausted: false };
+  view.operators[0]!.recovery = { qualification: 'same-host-generated-EOA-demo', restoredInFreshProcess: true,
+    retiredOwnerRejected: true, report: {} } as unknown as NonNullable<SessionView['operators'][number]['recovery']>;
+  const html = renderSessionView(view, active);
+  const ask = html.slice(html.indexOf('<section class="task-panel" id="ask"'), html.indexOf('<section class="task-panel" id="review"'));
+  const review = html.slice(html.indexOf('<section class="task-panel" id="review"'), html.indexOf('<section class="task-panel" id="resilience"'));
+  const ownership = html.slice(html.indexOf('<section class="task-panel" id="ownership"'));
+  assert.match(ask, /Fixed authored fixture brief[^]*?two people[^]*?\$150[^]*?not live city data/i);
+  assert.match(review, /Shared feedback slots: 1 of 8 remaining/);
+  assert.match(review, /Resetting your browser journey does not replenish/);
+  assert.match(ownership, /one recovery per operator[^]*?shared across browsers/i);
+  assert.match(ownership, /Recovery used for this operator/);
+});
+
+test('shared recovery requires this browser to choose a city before its one-shot control is enabled', () => {
+  const view = emptyView(); view.browserIsolation = 'shared-fixture';
+  view.operators = [{ id: 'operator-1', label: 'Operator 1', safe: '0x123', services: [] }];
+  const before = renderSessionView(view, active);
+  assert.match(before, /Choose a city in this browser before shared operator recovery/);
+  assert.match(actionForm(before, 'recover') ?? '', /<button disabled>Recover &amp; migrate Food first<\/button>/);
+  view.discovery = discoveredView('unavailable').discovery;
+  const after = renderSessionView(view, active);
+  assert.doesNotMatch(actionForm(after, 'recover') ?? '', /<button disabled>/);
+});
+
 test('overview is an accessible read-only entry point in the app and saved snapshots', () => {
   for (const options of [active, undefined]) {
     const html = renderSessionView(emptyView(), options);

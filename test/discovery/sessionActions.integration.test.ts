@@ -5,10 +5,14 @@ import { startSessionServer } from '../../src/demo/sessionServer.js';
 import { createSharedBrowserSessions } from '../../src/demo/sharedBrowserSessions.js';
 import childProcess, { type ChildProcess } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import { syntheticEveningPlan } from '../../src/a2a/answer.js';
+import type { EveningPlanInput } from '../../src/a2a/input.js';
 
 test('one real fixture isolates browser journeys and restores Index faults between users', { timeout: 360000 }, async () => {
+  const received = new Map<string, EveningPlanInput>();
   await withDemoSession(process.env.NANDA_INDEX_CHECKOUT!, async (base) => {
     await base.ready();
+    assert.equal(base.view().feedbackCapacity.total, 64);
     const pool = createSharedBrowserSessions(base);
     const chicago = pool.open('a'.repeat(64)), boston = pool.open('b'.repeat(64));
     const run = async (session: typeof chicago, action: Parameters<typeof session.start>[0], id: string) =>
@@ -26,6 +30,18 @@ test('one real fixture isolates browser journeys and restores Index faults betwe
       assert.deepEqual(boston.view().invocations.map((item) => item.id), ['boston-ask']);
       assert.notEqual(chicago.view().invocations[0]!.taskId, boston.view().invocations[0]!.taskId,
         'specialist requests must retain distinct A2A tasks');
+      for (const city of ['Chicago', 'Boston']) {
+        assert.equal(received.get(city)?.budget.minorUnits, '15000');
+        assert.ok(received.get(city)?.preferences.includes('Plan for two people'),
+          'the actual signed request received by the provider must retain the two-person brief');
+      }
+      for (let i = 0; i < 9; i++) {
+        const review = await run(chicago, { kind: 'feedback', invocationId: 'chicago-ask', value: 4 }, `review-${i}`);
+        assert.equal(review.state, 'completed', 'the ninth hosted review must not exhaust the old eight-slot limit');
+      }
+      assert.equal(chicago.view().feedbackCapacity.used, 9);
+      assert.equal(boston.view().feedbackCapacity.used, 9, 'feedback capacity is shared, not per browser');
+      assert.deepEqual(chicago.view().feedback[8]!.retained, { A: true, B: true });
 
       const [fault, otherRead] = await Promise.all([
         run(chicago, { kind: 'index', index: 'A', state: 'stop', city: 'Chicago' }, 'chicago-fault'),
@@ -42,7 +58,10 @@ test('one real fixture isolates browser journeys and restores Index faults betwe
       assert.equal(chicago.view().invocations.length, 0);
       assert.equal(boston.view().invocations.length, 1, 'one browser reset cannot clear another browser journey');
     } finally { await pool.close(); }
-  });
+  }, { feedbackCapacity: 64, executor: ({ emphasis }) => async (request) => {
+    received.set(request.input.city, request.input);
+    return syntheticEveningPlan(request, emphasis);
+  } });
 });
 
 test('Index experiments invalidate old discovery and report fresh verified observations', { timeout: 360000 }, async () => {
