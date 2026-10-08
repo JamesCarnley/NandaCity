@@ -5,8 +5,16 @@ import { createServer } from 'node:http';
 import { createPublicClient, http } from 'viem';
 import { recordedCli, events } from './signalHarness.js';
 
-import { assertOwnedIndexReady, resolveLocalDocker, safeCommandFailure, settleOwnedCleanup, withOwnedIndexes } from '../../src/demo/indexProcesses.js';
+import { assertOwnedIndexReady, ownedIndexPollMs, resolveLocalDocker, safeCommandFailure, settleOwnedCleanup, withOwnedIndexes } from '../../src/demo/indexProcesses.js';
 import { withOwnedLifecycle } from '../../src/demo/ownedLifecycle.js';
+
+test('owned Index followers use a production-suitable cadence with bounded overrides', () => {
+  assert.equal(ownedIndexPollMs({}), 2_000);
+  assert.equal(ownedIndexPollMs({ NANDA_CITY_INDEX_POLL_MS: '5000' }), 5_000);
+  for (const value of ['', '99', '60001', '1.5', 'fast']) {
+    assert.throws(() => ownedIndexPollMs({ NANDA_CITY_INDEX_POLL_MS: value }), /Index follower poll interval/);
+  }
+});
 
 test('owned PostgreSQL refuses persisted, missing, duplicate or unwritable data mounts', async () => {
   const module = await import('../../src/demo/indexProcesses.js') as

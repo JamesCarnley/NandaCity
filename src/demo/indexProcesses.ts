@@ -12,6 +12,18 @@ export const INDEX_PUBLIC_REPOSITORY = 'https://github.com/JamesCarnley/nanda-in
 // Updated only after the reviewed public source commit is known.
 export const INDEX_SOURCE_COMMIT = 'b9c6ccef4907c5dc3c7d9d898cf671207166f435';
 const LABEL = 'org.nandacity.owned-demo';
+const DEFAULT_INDEX_POLL_MS = 2_000;
+
+export function ownedIndexPollMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env['NANDA_CITY_INDEX_POLL_MS'];
+  if (raw === undefined) return DEFAULT_INDEX_POLL_MS;
+  if (!/^[0-9]+$/.test(raw)) throw new Error('Index follower poll interval must be an integer from 100 to 60000 milliseconds');
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 100 || value > 60_000) {
+    throw new Error('Index follower poll interval must be an integer from 100 to 60000 milliseconds');
+  }
+  return value;
+}
 
 export type IdentitySourceConfig = {
   chainId: number; registry: `0x${string}`; genesisHash: `0x${string}`;
@@ -217,6 +229,7 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
     }
   }
   const docker = await resolveLocalDocker();
+  const followerPollMs = ownedIndexPollMs();
   lifecycle.check();
   const checkout = await assertPinnedCheckout(indexCheckout);
   const serverDir = join(checkout, 'server');
@@ -283,11 +296,11 @@ async function runWithOwnedIndexes<T>(indexCheckout: string, source: IdentitySou
     const env = childEnv({ NODE_ENV: 'development', PORT: String(indexPort),
       API_BASE_URL: origin, BIND_HOST: '127.0.0.1',
       DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:${pgPort}/${database}`,
-      ERC8004_IDENTITY_CONFIG: source ? JSON.stringify({ ...source, rpcUrl: rpcUrls![name], pollMs: 100,
+      ERC8004_IDENTITY_CONFIG: source ? JSON.stringify({ ...source, rpcUrl: rpcUrls![name], pollMs: followerPollMs,
         maxBlockSpan: 200 }) : '', ERC8004_FEEDBACK_CONFIG: '', SMTP_URL: 'log',
       ...(options.originArchive ? { ORIGIN_ARCHIVE_CONFIG: JSON.stringify(options.originArchive[name]) } : {}),
       ...(options.feedback?.[name] ? { ERC8004_FEEDBACK_CONFIG: JSON.stringify({ ...options.feedback[name],
-        rpcUrl: `${rpcUrls![name].replace(/\/$/, '')}/`, pollMs: 100, maxBlockSpan: 128 }) } : {}) });
+        rpcUrl: `${rpcUrls![name].replace(/\/$/, '')}/`, pollMs: followerPollMs, maxBlockSpan: 128 }) } : {}) });
     await command('node', ['dist/db/migrate.js'], serverDir, env);
     active();
     const child = spawn(options.serverExecutable ?? 'node', ['dist/server.js'], { cwd: serverDir, env,
