@@ -263,6 +263,11 @@ or the Index checkout. `npm run check` runs typechecking, all unit tests, the
 production build, and the real-chain/Index integration suite. Generated TypeScript
 files are written to `dist/` and are not committed.
 
+Owned Index followers use a 2-second production cadence by default. Set
+`NANDA_CITY_INDEX_POLL_MS` to an integer from 100 through 60000 milliseconds to
+override it. The integration script intentionally uses 100 milliseconds so its
+write-heavy fixture scenarios complete within their fixed test deadlines.
+
 Before any Docker mutation, the demo resolves the selected Docker endpoint
 (`DOCKER_CONTEXT` takes precedence over `DOCKER_HOST`, otherwise the saved
 context is inspected). Only an absolute `unix:///...` socket endpoint is
